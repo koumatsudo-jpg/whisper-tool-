@@ -1,0 +1,18 @@
+# 処理履歴（個人のローカルデータ）
+history.json
+
+# テスト用音声
+test.wav
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# 一時ファイル
+*.tmp
