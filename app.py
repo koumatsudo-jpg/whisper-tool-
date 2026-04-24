@@ -27,6 +27,32 @@ HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history
 # 動画拡張子（音声抽出が必要なもの）
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".avi", ".mkv", ".flv", ".wmv"}
 
+# モデルサイズ → mlx-community HuggingFace リポジトリ
+MLX_REPO_MAP = {
+    "tiny": "mlx-community/whisper-tiny-mlx",
+    "base": "mlx-community/whisper-base-mlx",
+    "small": "mlx-community/whisper-small-mlx",
+    "medium": "mlx-community/whisper-medium-mlx",
+    "distil-large-v3": "mlx-community/distil-whisper-large-v3",
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+}
+
+
+def detect_low_memory_default():
+    """物理メモリ 16GB 以下の Mac を自動で「軽量モード」のデフォルト ON にする"""
+    try:
+        import psutil
+        total_gb = psutil.virtual_memory().total / (1024 ** 3)
+        return total_gb <= 16
+    except ImportError:
+        # psutil が無い場合は OFF（従来どおり）で起動する
+        return False
+
+
+def recommended_model_for_memory(low_memory):
+    """メモリ状況に応じた推奨デフォルトモデル"""
+    return "small" if low_memory else "large-v3-turbo"
+
 
 def load_history():
     if os.path.exists(HISTORY_PATH):
@@ -112,9 +138,7 @@ class WhisperApp(ctk.CTk):
 
         # --- モデルキャッシュ ---
         self._diarization_pipeline = None
-        self._whisper_model = None
-        self._whisper_model_size = None
-        self._whisper_turbo = None
+        self._whisper_repo = None  # mlx-whisper は関数ベースなので repo 名のみ保持
 
         # --- 進捗追跡 ---
         self._elapsed_timer_running = False
@@ -186,12 +210,13 @@ class WhisperApp(ctk.CTk):
             font=ctk.CTkFont(size=13)
         ).pack(side="left", padx=(0, 8))
 
-        self.model_var = ctk.StringVar(value="small")
+        _low_memory_default = detect_low_memory_default()
+        self.model_var = ctk.StringVar(value=recommended_model_for_memory(_low_memory_default))
         self.model_menu = ctk.CTkOptionMenu(
             self.controls_frame,
             variable=self.model_var,
-            values=["tiny", "base", "small", "medium", "distil-large-v3"],
-            width=160
+            values=["tiny", "base", "small", "medium", "distil-large-v3", "large-v3-turbo"],
+            width=180
         )
         self.model_menu.pack(side="left")
 
@@ -216,6 +241,27 @@ class WhisperApp(ctk.CTk):
             onvalue=True, offvalue=False
         )
         self.turbo_switch.pack(side="left")
+
+        self.diarization_var = ctk.BooleanVar(value=True)
+        self.diarization_switch = ctk.CTkSwitch(
+            self.mode_frame,
+            text="話者分離",
+            variable=self.diarization_var,
+            font=ctk.CTkFont(size=12),
+            onvalue=True, offvalue=False
+        )
+        self.diarization_switch.pack(side="left", padx=(16, 0))
+
+        # 軽量モード（8〜16GB Mac向け。batch_size を下げて高速モードを抑制）
+        self.low_memory_var = ctk.BooleanVar(value=_low_memory_default)
+        self.low_memory_switch = ctk.CTkSwitch(
+            self.mode_frame,
+            text="軽量モード（8〜16GB Mac）",
+            variable=self.low_memory_var,
+            font=ctk.CTkFont(size=12),
+            onvalue=True, offvalue=False
+        )
+        self.low_memory_switch.pack(side="left", padx=(16, 0))
 
         self.mode_hint = ctk.CTkLabel(
             self.mode_frame, text="省メモリ",
@@ -480,45 +526,41 @@ class WhisperApp(ctk.CTk):
     # ==================== モデル準備 ====================
     def _ensure_models(self, model_size):
         """モデルをロード（キャッシュあれば再利用）"""
-        turbo = self.turbo_var.get()
-        cpu_threads = 8 if turbo else 4
+        if self.diarization_var.get():
+            if self._diarization_pipeline is None:
+                self.after(0, self.update_progress, 6, "話者分離モデルを読み込み中...")
+                from pyannote.audio import Pipeline
+                import torch
+                token_path = os.path.expanduser("~/.huggingface/token")
+                with open(token_path, "r") as f:
+                    hf_token = f.read().strip()
+                self._diarization_pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    token=hf_token
+                )
+                if torch.backends.mps.is_available():
+                    self._diarization_pipeline = self._diarization_pipeline.to(torch.device("mps"))
+            # 軽量モードON: batch_size=16、OFF: batch_size=64（メモリ圧を可変で調整）
+            batch_size = 16 if self.low_memory_var.get() else 64
+            if hasattr(self._diarization_pipeline, "segmentation_batch_size"):
+                self._diarization_pipeline.segmentation_batch_size = batch_size
+            if hasattr(self._diarization_pipeline, "embedding_batch_size"):
+                self._diarization_pipeline.embedding_batch_size = batch_size
+            self.after(0, self.update_progress, 10,
+                       f"話者分離モデル準備完了（MPS・batch={batch_size}）")
 
-        if self._diarization_pipeline is None:
-            self.after(0, self.update_progress, 6, "話者分離モデルを読み込み中...")
-            from pyannote.audio import Pipeline
-            import torch
-            token_path = os.path.expanduser("~/.huggingface/token")
-            with open(token_path, "r") as f:
-                hf_token = f.read().strip()
-            self._diarization_pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
-                token=hf_token
-            )
-            if torch.backends.mps.is_available():
-                self._diarization_pipeline = self._diarization_pipeline.to(torch.device("mps"))
-            self.after(0, self.update_progress, 10, "話者分離モデル準備完了（MPS）")
-
-        if (self._whisper_model is None
-                or self._whisper_model_size != model_size
-                or self._whisper_turbo != turbo):
-            mode_label = "高速" if turbo else "省メモリ"
+        target_repo = MLX_REPO_MAP[model_size]
+        if self._whisper_repo != target_repo:
             self.after(0, self.update_progress, 11,
-                       f"Faster Whisper（{model_size}・{mode_label}）を読み込み中...")
-            from faster_whisper import WhisperModel
-            self._whisper_model = WhisperModel(
-                model_size,
-                device="cpu",
-                compute_type="int8",
-                cpu_threads=cpu_threads
-            )
-            self._whisper_model_size = model_size
-            self._whisper_turbo = turbo
+                       f"Whisper ({model_size}) を準備中...")
+            self._whisper_repo = target_repo
             self.after(0, self.update_progress, 14, "Whisperモデル準備完了")
 
     # ==================== 1ファイル処理 ====================
     def _process_one_file(self, file_path, model_size):
         """1ファイルを処理して (output_path, result_text) を返す"""
-        turbo = self.turbo_var.get()
+        # 軽量モード時は並列実行（turbo）を強制 OFF にし、メモリ競合を避ける
+        turbo = self.turbo_var.get() and not self.low_memory_var.get()
         ext = os.path.splitext(file_path)[1].lower()
 
         # Step 1: 動画→音声抽出
@@ -544,6 +586,7 @@ class WhisperApp(ctk.CTk):
         # Step 3 & 4: 話者分離 + 文字起こし
         diarization = None
         all_segments = []
+        diarization_enabled = self.diarization_var.get()
 
         def do_diarization():
             nonlocal diarization
@@ -556,45 +599,56 @@ class WhisperApp(ctk.CTk):
 
         def do_transcription():
             nonlocal all_segments
+            import mlx_whisper
             for i, (chunk_path, offset) in enumerate(chunks):
                 pct = 18 + int((i / total_chunks) * 62)
                 self.after(0, self.update_progress, pct,
                            f"文字起こし中... チャンク {i+1}/{total_chunks}")
-                segments_iter, _ = self._whisper_model.transcribe(
+                result = mlx_whisper.transcribe(
                     chunk_path,
+                    path_or_hf_repo=self._whisper_repo,
                     language="ja",
-                    beam_size=1,
-                    vad_filter=True,
-                    vad_parameters=dict(min_silence_duration_ms=500),
+                    verbose=False,
+                    word_timestamps=False,
+                    condition_on_previous_text=False,
+                    no_speech_threshold=0.6,
                 )
-                for seg in segments_iter:
+                for seg in result["segments"]:
                     all_segments.append({
-                        "start": seg.start + offset,
-                        "end": seg.end + offset,
-                        "text": seg.text,
+                        "start": seg["start"] + offset,
+                        "end": seg["end"] + offset,
+                        "text": seg["text"],
                     })
 
-        if turbo:
+        if turbo and diarization_enabled:
             self.after(0, self.update_progress, 17, "並列処理中（高速モード）...")
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 d_future = executor.submit(do_diarization)
                 t_future = executor.submit(do_transcription)
                 d_future.result()
                 t_future.result()
-        else:
+        elif diarization_enabled:
             do_diarization()
             self.after(0, self.update_progress, 45, "話者分離完了")
+            do_transcription()
+        else:
+            self.after(0, self.update_progress, 18, "文字起こしを開始（話者分離スキップ）...")
             do_transcription()
 
         self.after(0, self.update_progress, 85, "結合中...")
 
-        # Step 5: 話者とテキストを結合
-        diarization_list = [
-            (turn.start, turn.end, speaker)
-            for turn, _, speaker in diarization.itertracks(yield_label=True)
-        ]
+        # Step 5: 話者とテキストを結合（話者分離OFFのときは全セグメントを単一話者として扱う）
+        if diarization is not None:
+            diarization_list = [
+                (turn.start, turn.end, speaker)
+                for turn, _, speaker in diarization.itertracks(yield_label=True)
+            ]
+        else:
+            diarization_list = []
 
         def get_speaker(seg_start, seg_end):
+            if not diarization_list:
+                return "話者1"
             best_speaker = "不明"
             best_overlap = 0
             for d_start, d_end, speaker in diarization_list:

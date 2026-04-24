@@ -72,20 +72,23 @@ echo "▶ パッケージをインストール中..."
 echo "  （合計10〜20分かかることがあります。そのままお待ちください）"
 echo ""
 
-echo "  [1/5] torch（AI エンジン）..."
+echo "  [1/6] torch（AI エンジン）..."
 pip install --quiet torch
 
-echo "  [2/5] faster-whisper（文字起こし）..."
-pip install --quiet faster-whisper
+echo "  [2/6] mlx-whisper（文字起こし / Apple Silicon 最適化）..."
+pip install --quiet mlx-whisper
 
-echo "  [3/5] pyannote.audio（話者分離）..."
+echo "  [3/6] pyannote.audio（話者分離）..."
 pip install --quiet "pyannote.audio"
 
-echo "  [4/5] customtkinter（画面）..."
+echo "  [4/6] customtkinter（画面）..."
 pip install --quiet customtkinter
 
-echo "  [5/5] tkinterdnd2（ドラッグ＆ドロップ）..."
+echo "  [5/6] tkinterdnd2（ドラッグ＆ドロップ）..."
 pip install --quiet tkinterdnd2 || echo "  ※ tkinterdnd2 は省略（なくても動作します）"
+
+echo "  [6/6] psutil（メモリ自動判定）..."
+pip install --quiet psutil || echo "  ※ psutil は省略（軽量モードの自動判定だけ無効）"
 
 echo ""
 echo "  パッケージ: OK"
@@ -143,5 +146,6 @@ echo ""
 echo "  デスクトップの「文字起こし.command」をダブルクリックして起動してください"
 echo ""
 echo "  ⚠️  初回起動時のみ、AIモデルのダウンロードが自動で始まります"
-echo "     （約800MB・5〜10分）完了すると自動でツールが開きます"
+echo "     （large-v3-turbo で約800MB、初回は5〜10分）完了すると自動でツールが開きます"
+echo "     ※ モデルは ~/.cache/huggingface/hub にキャッシュされます"
 echo ""
