@@ -1,8 +1,13 @@
 # 処理履歴（個人のローカルデータ）
 history.json
+settings.json
 
 # テスト用音声
 test.wav
+
+# 生成物
+*_文字起こし.txt
+*_サマリー.txt
 
 # Python
 __pycache__/

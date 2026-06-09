@@ -5,6 +5,8 @@ import os
 import json
 import subprocess
 import tempfile
+import urllib.error
+import urllib.request
 from tkinter import filedialog
 from datetime import datetime
 import traceback
@@ -23,9 +25,25 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 HISTORY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.json")
+SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 
-# 動画拡張子（音声抽出が必要なもの）
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".avi", ".mkv", ".flv", ".wmv"}
+DEFAULT_SETTINGS = {
+    "summary_enabled": False,
+    "backend": "ollama",
+    "model": "llama3.1",
+    "api_key": "",
+}
+
+BACKEND_DEFAULT_MODELS = {
+    "ollama": "llama3.1",
+    "claude": "claude-sonnet-4-6",
+    "openai": "gpt-4.1-mini",
+}
+
+# 文字起こし／話者分離パイプラインに直接渡せるのは WAV のみ。
+# 動画はもちろん、.m4a / .mp3 / .flac 等の音声コンテナも pyannote が読めずフリーズすることがあるため、
+# .wav 以外はすべて ffmpeg で 16kHz mono WAV に統一変換してから渡す。
+WAV_EXT = ".wav"
 
 # モデルサイズ → mlx-community HuggingFace リポジトリ
 MLX_REPO_MAP = {
@@ -64,6 +82,145 @@ def load_history():
 def save_history(history):
     with open(HISTORY_PATH, "w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False, indent=2)
+
+
+def load_settings():
+    settings = DEFAULT_SETTINGS.copy()
+    if os.path.exists(SETTINGS_PATH):
+        try:
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                settings.update({k: loaded.get(k, v) for k, v in DEFAULT_SETTINGS.items()})
+        except Exception:
+            pass
+    backend = settings.get("backend", "ollama")
+    if backend not in BACKEND_DEFAULT_MODELS:
+        backend = "ollama"
+    settings["backend"] = backend
+    if not settings.get("model"):
+        settings["model"] = BACKEND_DEFAULT_MODELS[backend]
+    settings["summary_enabled"] = bool(settings.get("summary_enabled"))
+    settings["api_key"] = str(settings.get("api_key") or "")
+    return settings
+
+
+def save_settings(settings):
+    normalized = DEFAULT_SETTINGS.copy()
+    normalized.update({k: settings.get(k, v) for k, v in DEFAULT_SETTINGS.items()})
+
+    def opener(path, flags):
+        return os.open(path, flags, 0o600)
+
+    with open(SETTINGS_PATH, "w", encoding="utf-8", opener=opener) as f:
+        json.dump(normalized, f, ensure_ascii=False, indent=2)
+    try:
+        os.chmod(SETTINGS_PATH, 0o600)
+    except Exception:
+        pass
+
+
+def _json_post(url, payload, headers=None, timeout=60):
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            **(headers or {}),
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"APIエラー: HTTP {e.code}\n{detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(str(e.reason)) from e
+    return json.loads(body)
+
+
+def _summary_prompt(transcript):
+    return (
+        "以下の会議・会話の文字起こしを日本語で要約してください。\n\n"
+        "出力形式:\n"
+        "1. 議題\n"
+        "2. 決定事項\n"
+        "3. ToDo\n"
+        "4. 発言者ごとの要点\n"
+        "5. 補足・未決事項\n\n"
+        "話者ラベルとタイムスタンプは必要な箇所だけ残してください。\n\n"
+        "文字起こし:\n"
+        f"{transcript}"
+    )
+
+
+def _api_key_for_backend(backend, settings):
+    if backend == "claude":
+        return os.environ.get("ANTHROPIC_API_KEY") or settings.get("api_key", "")
+    if backend == "openai":
+        return os.environ.get("OPENAI_API_KEY") or settings.get("api_key", "")
+    return ""
+
+
+def summarize_text(transcript, settings):
+    backend = settings.get("backend", "ollama")
+    model = settings.get("model") or BACKEND_DEFAULT_MODELS.get(backend, "llama3.1")
+    prompt = _summary_prompt(transcript)
+
+    if backend == "ollama":
+        try:
+            data = _json_post(
+                "http://localhost:11434/api/generate",
+                {"model": model, "prompt": prompt, "stream": False},
+                timeout=180,
+            )
+        except RuntimeError as e:
+            raise RuntimeError(
+                "Ollamaが見つかりません。`brew install ollama` 後に "
+                f"`ollama pull {model}` を実行し、Ollamaを起動してください。\n\n{e}"
+            ) from e
+        return data.get("response", "").strip()
+
+    if backend == "claude":
+        api_key = _api_key_for_backend("claude", settings)
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY または設定画面のAPIキーを指定してください。")
+        data = _json_post(
+            "https://api.anthropic.com/v1/messages",
+            {
+                "model": model,
+                "max_tokens": 1600,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+            timeout=120,
+        )
+        parts = data.get("content", [])
+        return "\n".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
+
+    if backend == "openai":
+        api_key = _api_key_for_backend("openai", settings)
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY または設定画面のAPIキーを指定してください。")
+        data = _json_post(
+            "https://api.openai.com/v1/chat/completions",
+            {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.2,
+            },
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=120,
+        )
+        return data["choices"][0]["message"]["content"].strip()
+
+    raise RuntimeError(f"未対応のサマリーAIです: {backend}")
 
 
 def extract_audio(video_path, output_path):
@@ -149,6 +306,9 @@ class WhisperApp(ctk.CTk):
         self._batch_results = []
         self._batch_errors = []
         self._output_path = None
+        self._summary_output_path = None
+        self._summary_running = False
+        self.summary_settings = load_settings()
 
         # --- メインコンテナ ---
         self.main_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -156,17 +316,19 @@ class WhisperApp(ctk.CTk):
 
         # === ヘッダー ===
         ctk.CTkLabel(
-            self.main_frame, text="文字起こしツール",
+            self.main_frame, text="🎙 文字起こしツール",
             font=ctk.CTkFont(size=26, weight="bold")
         ).pack(pady=(0, 2))
 
         ctk.CTkLabel(
-            self.main_frame, text="Faster Whisper + 話者分離（バッチ対応）",
-            font=ctk.CTkFont(size=13), text_color="gray"
+            self.main_frame, text="MLX Whisper + 話者分離 + ローカル優先AIサマリー",
+            font=ctk.CTkFont(size=13), text_color="#9CA3AF"
         ).pack(pady=(0, 16))
 
         # === 入力セクション ===
-        self.input_section = ctk.CTkFrame(self.main_frame)
+        self.input_section = ctk.CTkFrame(
+            self.main_frame, fg_color="#141A22", border_width=1, border_color="#223044"
+        )
         self.input_section.pack(fill="x", pady=(0, 12))
 
         # --- ヘッダー行（タイトル + クリアボタン） ---
@@ -174,14 +336,14 @@ class WhisperApp(ctk.CTk):
         input_header_frame.pack(fill="x", padx=16, pady=(12, 8))
 
         ctk.CTkLabel(
-            input_header_frame, text="ファイル選択",
+            input_header_frame, text="📁 ファイル選択",
             font=ctk.CTkFont(size=14, weight="bold"), anchor="w"
         ).pack(side="left")
 
         self.clear_files_button = ctk.CTkButton(
             input_header_frame, text="クリア",
             font=ctk.CTkFont(size=11), height=24, width=60,
-            fg_color="gray30", command=self._clear_files
+            fg_color="#263241", hover_color="#334155", command=self._clear_files
         )
         self.clear_files_button.pack(side="right")
 
@@ -224,6 +386,7 @@ class WhisperApp(ctk.CTk):
             self.controls_frame, text="文字起こし開始",
             font=ctk.CTkFont(size=14, weight="bold"),
             height=36, width=180,
+            fg_color="#2563EB", hover_color="#1D4ED8",
             command=self.start_transcribe
         )
         self.run_button.pack(side="right")
@@ -235,7 +398,7 @@ class WhisperApp(ctk.CTk):
         self.turbo_var = ctk.BooleanVar(value=False)
         self.turbo_switch = ctk.CTkSwitch(
             self.mode_frame,
-            text="高速モード（他アプリを閉じて使用推奨）",
+            text="高速",
             variable=self.turbo_var,
             font=ctk.CTkFont(size=12),
             onvalue=True, offvalue=False
@@ -256,26 +419,51 @@ class WhisperApp(ctk.CTk):
         self.low_memory_var = ctk.BooleanVar(value=_low_memory_default)
         self.low_memory_switch = ctk.CTkSwitch(
             self.mode_frame,
-            text="軽量モード（8〜16GB Mac）",
+            text="軽量",
             variable=self.low_memory_var,
             font=ctk.CTkFont(size=12),
             onvalue=True, offvalue=False
         )
         self.low_memory_switch.pack(side="left", padx=(16, 0))
 
+        self.summary_enabled_var = ctk.BooleanVar(
+            value=bool(self.summary_settings.get("summary_enabled", False))
+        )
+        self.summary_switch = ctk.CTkSwitch(
+            self.mode_frame,
+            text="サマリー",
+            variable=self.summary_enabled_var,
+            font=ctk.CTkFont(size=12),
+            onvalue=True, offvalue=False,
+            command=self._on_summary_toggle
+        )
+        self.summary_switch.pack(side="left", padx=(16, 0))
+
+        self.summary_settings_button = ctk.CTkButton(
+            self.mode_frame,
+            text="⚙",
+            font=ctk.CTkFont(size=14),
+            width=34, height=26,
+            fg_color="#263241", hover_color="#334155",
+            command=self.open_summary_settings
+        )
+        self.summary_settings_button.pack(side="left", padx=(8, 0))
+
         self.mode_hint = ctk.CTkLabel(
-            self.mode_frame, text="省メモリ",
+            self.mode_frame, text="ローカル優先",
             font=ctk.CTkFont(size=11), text_color="gray"
         )
         self.mode_hint.pack(side="right")
         self.turbo_var.trace_add("write", self._on_mode_change)
 
         # === 進捗セクション ===
-        self.progress_section = ctk.CTkFrame(self.main_frame)
+        self.progress_section = ctk.CTkFrame(
+            self.main_frame, fg_color="#141A22", border_width=1, border_color="#223044"
+        )
         self.progress_section.pack(fill="x", pady=(0, 12))
 
         ctk.CTkLabel(
-            self.progress_section, text="進捗",
+            self.progress_section, text="⏱ 進捗",
             font=ctk.CTkFont(size=14, weight="bold"), anchor="w"
         ).pack(fill="x", padx=16, pady=(12, 8))
 
@@ -292,7 +480,8 @@ class WhisperApp(ctk.CTk):
 
         self.status_label = ctk.CTkLabel(
             self.progress_section, text="待機中",
-            font=ctk.CTkFont(size=12), text_color="gray", anchor="w"
+            font=ctk.CTkFont(size=12), text_color="#CBD5E1", anchor="w",
+            fg_color="#1F2937", corner_radius=8
         )
         self.status_label.pack(fill="x", padx=16, pady=(0, 4))
 
@@ -303,46 +492,64 @@ class WhisperApp(ctk.CTk):
         self.elapsed_label.pack(fill="x", padx=16, pady=(0, 12))
 
         # === 結果プレビューセクション ===
-        self.preview_section = ctk.CTkFrame(self.main_frame)
+        self.preview_section = ctk.CTkFrame(
+            self.main_frame, fg_color="#141A22", border_width=1, border_color="#223044"
+        )
         self.preview_section.pack(fill="both", expand=True, pady=(0, 12))
 
         preview_header_frame = ctk.CTkFrame(self.preview_section, fg_color="transparent")
         preview_header_frame.pack(fill="x", padx=16, pady=(12, 8))
 
         ctk.CTkLabel(
-            preview_header_frame, text="結果プレビュー",
+            preview_header_frame, text="📝 結果プレビュー",
             font=ctk.CTkFont(size=14, weight="bold"), anchor="w"
         ).pack(side="left")
 
         self.open_file_button = ctk.CTkButton(
             preview_header_frame, text="ファイルを開く",
             font=ctk.CTkFont(size=12), height=28, width=100,
-            fg_color="gray30", command=self.open_result_file, state="disabled"
+            fg_color="#263241", hover_color="#334155",
+            command=self.open_result_file, state="disabled"
         )
         self.open_file_button.pack(side="right")
 
+        self.preview_tabs = ctk.CTkTabview(self.preview_section, fg_color="#111827")
+        self.preview_tabs.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+        self.preview_tabs.add("文字起こし")
+        self.preview_tabs.add("サマリー")
+
         self.preview_text = ctk.CTkTextbox(
-            self.preview_section, font=ctk.CTkFont(size=12),
-            state="disabled", fg_color=("gray90", "gray17")
+            self.preview_tabs.tab("文字起こし"),
+            font=ctk.CTkFont(size=12),
+            state="disabled", fg_color="#0B1120"
         )
-        self.preview_text.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+        self.preview_text.pack(fill="both", expand=True, padx=8, pady=8)
+
+        self.summary_text = ctk.CTkTextbox(
+            self.preview_tabs.tab("サマリー"),
+            font=ctk.CTkFont(size=12),
+            state="disabled", fg_color="#0B1120"
+        )
+        self.summary_text.pack(fill="both", expand=True, padx=8, pady=8)
 
         # === 履歴セクション ===
-        self.history_section = ctk.CTkFrame(self.main_frame)
+        self.history_section = ctk.CTkFrame(
+            self.main_frame, fg_color="#141A22", border_width=1, border_color="#223044"
+        )
         self.history_section.pack(fill="x", pady=(0, 0))
 
         history_header_frame = ctk.CTkFrame(self.history_section, fg_color="transparent")
         history_header_frame.pack(fill="x", padx=16, pady=(12, 8))
 
         ctk.CTkLabel(
-            history_header_frame, text="処理履歴",
+            history_header_frame, text="📚 処理履歴",
             font=ctk.CTkFont(size=14, weight="bold"), anchor="w"
         ).pack(side="left")
 
         self.clear_history_button = ctk.CTkButton(
             history_header_frame, text="クリア",
             font=ctk.CTkFont(size=11), height=24, width=60,
-            fg_color="gray30", command=self.clear_history
+            fg_color="#263241", hover_color="#334155", command=self.clear_history
         )
         self.clear_history_button.pack(side="right")
 
@@ -359,7 +566,135 @@ class WhisperApp(ctk.CTk):
         if self.turbo_var.get():
             self.mode_hint.configure(text="高速（並列処理・メモリ多め）", text_color="#3B8ED0")
         else:
-            self.mode_hint.configure(text="省メモリ（順次処理）", text_color="gray")
+            self.mode_hint.configure(text="ローカル優先", text_color="gray")
+
+    def _on_summary_toggle(self):
+        self.summary_settings["summary_enabled"] = bool(self.summary_enabled_var.get())
+        save_settings(self.summary_settings)
+
+    def open_summary_settings(self):
+        window = ctk.CTkToplevel(self)
+        window.title("サマリー設定")
+        window.geometry("460x360")
+        window.resizable(False, False)
+        window.transient(self)
+        window.grab_set()
+
+        container = ctk.CTkFrame(window, fg_color="transparent")
+        container.pack(fill="both", expand=True, padx=22, pady=18)
+
+        ctk.CTkLabel(
+            container,
+            text="AIサマリー設定",
+            font=ctk.CTkFont(size=18, weight="bold"),
+            anchor="w"
+        ).pack(fill="x", pady=(0, 4))
+
+        helper = ctk.CTkLabel(
+            container,
+            text="Ollamaは外部送信なし。Claude/OpenAIは文字起こしテキストのみ送信します。",
+            font=ctk.CTkFont(size=12),
+            text_color="#9CA3AF",
+            anchor="w",
+            wraplength=410,
+            justify="left"
+        )
+        helper.pack(fill="x", pady=(0, 16))
+
+        backend_var = ctk.StringVar(value=self.summary_settings.get("backend", "ollama"))
+        model_var = ctk.StringVar(
+            value=self.summary_settings.get("model") or BACKEND_DEFAULT_MODELS["ollama"]
+        )
+        api_key_var = ctk.StringVar(value=self.summary_settings.get("api_key", ""))
+
+        row_backend = ctk.CTkFrame(container, fg_color="transparent")
+        row_backend.pack(fill="x", pady=(0, 12))
+        ctk.CTkLabel(row_backend, text="バックエンド", width=110, anchor="w").pack(side="left")
+        backend_menu = ctk.CTkOptionMenu(
+            row_backend,
+            values=["ollama", "claude", "openai"],
+            variable=backend_var,
+            width=190
+        )
+        backend_menu.pack(side="left")
+
+        row_model = ctk.CTkFrame(container, fg_color="transparent")
+        row_model.pack(fill="x", pady=(0, 12))
+        ctk.CTkLabel(row_model, text="モデル", width=110, anchor="w").pack(side="left")
+        model_entry = ctk.CTkEntry(row_model, textvariable=model_var, width=260)
+        model_entry.pack(side="left", fill="x", expand=True)
+
+        row_key = ctk.CTkFrame(container, fg_color="transparent")
+        row_key.pack(fill="x", pady=(0, 8))
+        ctk.CTkLabel(row_key, text="APIキー", width=110, anchor="w").pack(side="left")
+        api_key_entry = ctk.CTkEntry(row_key, textvariable=api_key_var, width=260, show="*")
+        api_key_entry.pack(side="left", fill="x", expand=True)
+
+        key_hint = ctk.CTkLabel(
+            container,
+            text="環境変数 ANTHROPIC_API_KEY / OPENAI_API_KEY がある場合はそちらを優先します。",
+            font=ctk.CTkFont(size=11),
+            text_color="#9CA3AF",
+            anchor="w",
+            wraplength=410,
+            justify="left"
+        )
+        key_hint.pack(fill="x", pady=(0, 18))
+
+        def refresh_key_visibility(*args):
+            backend = backend_var.get()
+            if backend == "ollama":
+                row_key.pack_forget()
+                key_hint.configure(text="ローカルOllamaは外部送信なし。未起動なら文字起こし完了後に案内を表示します。")
+            else:
+                row_key.pack(fill="x", pady=(0, 8), before=key_hint)
+                key_hint.configure(
+                    text="環境変数 ANTHROPIC_API_KEY / OPENAI_API_KEY がある場合はそちらを優先します。"
+                )
+            if not model_var.get().strip():
+                model_var.set(BACKEND_DEFAULT_MODELS.get(backend, "llama3.1"))
+
+        def on_backend_change(choice):
+            current = model_var.get().strip()
+            previous_defaults = set(BACKEND_DEFAULT_MODELS.values())
+            if not current or current in previous_defaults:
+                model_var.set(BACKEND_DEFAULT_MODELS.get(choice, "llama3.1"))
+            refresh_key_visibility()
+
+        backend_menu.configure(command=on_backend_change)
+        refresh_key_visibility()
+
+        button_row = ctk.CTkFrame(container, fg_color="transparent")
+        button_row.pack(fill="x", pady=(8, 0))
+
+        def save_and_close():
+            backend = backend_var.get()
+            self.summary_settings.update({
+                "summary_enabled": bool(self.summary_enabled_var.get()),
+                "backend": backend,
+                "model": model_var.get().strip() or BACKEND_DEFAULT_MODELS.get(backend, "llama3.1"),
+                "api_key": api_key_var.get().strip(),
+            })
+            save_settings(self.summary_settings)
+            window.destroy()
+
+        ctk.CTkButton(
+            button_row,
+            text="保存",
+            width=120,
+            fg_color="#2563EB",
+            hover_color="#1D4ED8",
+            command=save_and_close
+        ).pack(side="right")
+
+        ctk.CTkButton(
+            button_row,
+            text="キャンセル",
+            width=100,
+            fg_color="#263241",
+            hover_color="#334155",
+            command=window.destroy
+        ).pack(side="right", padx=(0, 8))
 
     # ==================== ファイルリストUI ====================
     def _refresh_file_list(self):
@@ -383,7 +718,7 @@ class WhisperApp(ctk.CTk):
                     row, text=os.path.basename(path),
                     font=ctk.CTkFont(size=12), anchor="w"
                 ).pack(side="left", fill="x", expand=True, padx=(4, 0))
-                if not self.processing:
+                if not self.processing and not self._summary_running:
                     remove_btn = ctk.CTkButton(
                         row, text="×",
                         font=ctk.CTkFont(size=11), height=20, width=28,
@@ -393,17 +728,21 @@ class WhisperApp(ctk.CTk):
                     remove_btn.pack(side="right", padx=(4, 4))
 
     def _remove_file(self, path):
+        if self.processing or self._summary_running:
+            return
         if path in self.file_paths:
             self.file_paths.remove(path)
         self._refresh_file_list()
 
     def _clear_files(self):
+        if self.processing or self._summary_running:
+            return
         self.file_paths.clear()
         self._refresh_file_list()
 
     # ==================== D&D ====================
     def on_drop(self, event):
-        if self.processing:
+        if self.processing or self._summary_running:
             return
         try:
             paths = self.tk.splitlist(event.data)
@@ -419,7 +758,7 @@ class WhisperApp(ctk.CTk):
         self.file_list_frame.configure(border_width=0)
 
     def on_drag_enter(self, event):
-        if not self.processing:
+        if not self.processing and not self._summary_running:
             self.file_list_frame.configure(border_width=2, border_color="#3B8ED0")
 
     def on_drag_leave(self, event):
@@ -427,7 +766,7 @@ class WhisperApp(ctk.CTk):
 
     # ==================== ファイル選択 ====================
     def select_file(self, event=None):
-        if self.processing:
+        if self.processing or self._summary_running:
             return
         paths = filedialog.askopenfilenames(
             filetypes=[
@@ -446,7 +785,11 @@ class WhisperApp(ctk.CTk):
     # ==================== 進捗 ====================
     def update_progress(self, percent, text):
         self.progress.set(percent / 100)
-        self.status_label.configure(text=f"{text}（{percent}%）", text_color="white")
+        self.status_label.configure(
+            text=f"{text}（{percent}%）",
+            text_color="#F8FAFC",
+            fg_color="#1F2937"
+        )
 
     def _update_batch_status(self, idx, total, file_path):
         self._batch_status_label.configure(
@@ -477,11 +820,19 @@ class WhisperApp(ctk.CTk):
         self._elapsed_timer_running = False
 
     # ==================== プレビュー ====================
+    def _set_textbox_text(self, textbox, text):
+        textbox.configure(state="normal")
+        textbox.delete("1.0", "end")
+        textbox.insert("1.0", text)
+        textbox.configure(state="disabled")
+
     def show_preview(self, text):
-        self.preview_text.configure(state="normal")
-        self.preview_text.delete("1.0", "end")
-        self.preview_text.insert("1.0", text)
-        self.preview_text.configure(state="disabled")
+        self._set_textbox_text(self.preview_text, text)
+        self.preview_tabs.set("文字起こし")
+
+    def show_summary(self, text):
+        self._set_textbox_text(self.summary_text, text)
+        self.preview_tabs.set("サマリー")
 
     def open_result_file(self):
         if self._output_path and os.path.exists(self._output_path):
@@ -499,7 +850,7 @@ class WhisperApp(ctk.CTk):
 
     # ==================== 処理開始 ====================
     def start_transcribe(self):
-        if self.processing:
+        if self.processing or self._summary_running:
             return
         if not self.file_paths:
             self.status_label.configure(text="ファイルを選択してください", text_color="red")
@@ -508,15 +859,18 @@ class WhisperApp(ctk.CTk):
         self._batch_results = []
         self._batch_errors = []
         self._output_path = None
+        self._summary_output_path = None
         self._file_start_time = None
         self.run_button.configure(state="disabled")
         self.model_menu.configure(state="disabled")
         self.clear_files_button.configure(state="disabled")
+        self.summary_switch.configure(state="disabled")
+        self.summary_settings_button.configure(state="disabled")
         self.progress.set(0)
         self._batch_status_label.configure(text="")
-        self.preview_text.configure(state="normal")
-        self.preview_text.delete("1.0", "end")
-        self.preview_text.configure(state="disabled")
+        self._set_textbox_text(self.preview_text, "")
+        self._set_textbox_text(self.summary_text, "")
+        self.preview_tabs.set("文字起こし")
         self.open_file_button.configure(state="disabled")
         self.start_elapsed_timer()
         self._refresh_file_list()  # ×ボタンを隠す
@@ -563,16 +917,18 @@ class WhisperApp(ctk.CTk):
         turbo = self.turbo_var.get() and not self.low_memory_var.get()
         ext = os.path.splitext(file_path)[1].lower()
 
-        # Step 1: 動画→音声抽出
-        if ext in VIDEO_EXTENSIONS:
-            self.after(0, self.update_progress, 2, "動画から音声を抽出中...")
+        # Step 1: 入力を WAV に統一変換
+        # .wav 以外（動画も .m4a / .mp3 / .flac 等の音声コンテナも）は pyannote が直接読めず
+        # 話者分離フェーズでフリーズする実害が出る。よって .wav 以外は全部 ffmpeg で WAV 化する。
+        if ext == WAV_EXT:
+            audio_path = file_path
+        else:
+            self.after(0, self.update_progress, 2, "音声を WAV に変換中...")
             temp_audio = tempfile.mktemp(suffix=".wav")
             self._temp_files.append(temp_audio)
             extract_audio(file_path, temp_audio)
             audio_path = temp_audio
-            self.after(0, self.update_progress, 5, "音声抽出完了")
-        else:
-            audio_path = file_path
+            self.after(0, self.update_progress, 5, "音声変換完了")
 
         # Step 2: チャンク分割
         self.after(0, self.update_progress, 15, "音声を分割中...")
@@ -725,6 +1081,7 @@ class WhisperApp(ctk.CTk):
                     "file": file_path,
                     "output": output_path,
                     "elapsed": elapsed,
+                    "text": result_text,
                 })
                 self.after(0, self.add_history_entry, file_path, output_path, model_size)
                 self._output_path = output_path
@@ -747,8 +1104,14 @@ class WhisperApp(ctk.CTk):
         self.run_button.configure(state="normal")
         self.model_menu.configure(state="normal")
         self.clear_files_button.configure(state="normal")
+        self.summary_switch.configure(state="normal")
+        self.summary_settings_button.configure(state="normal")
         self._refresh_file_list()
-        self.status_label.configure(text=f"エラー: {str(error)[:80]}", text_color="red")
+        self.status_label.configure(
+            text=f"エラー: {str(error)[:80]}",
+            text_color="#FCA5A5",
+            fg_color="#3F1D24"
+        )
         self.show_preview(f"モデルの読み込みに失敗しました:\n\n{str(error)}\n\n{traceback.format_exc()}")
 
     # ==================== バッチ完了 ====================
@@ -759,6 +1122,8 @@ class WhisperApp(ctk.CTk):
         self.run_button.configure(state="normal")
         self.model_menu.configure(state="normal")
         self.clear_files_button.configure(state="normal")
+        self.summary_switch.configure(state="normal")
+        self.summary_settings_button.configure(state="normal")
         self._refresh_file_list()  # ×ボタンを再表示
 
         success_count = len(self._batch_results)
@@ -769,14 +1134,18 @@ class WhisperApp(ctk.CTk):
         if error_count == 0:
             self._batch_status_label.configure(text=f"全{success_count}件 完了！")
             self.status_label.configure(
-                text=f"完了！ {success_count}件処理（{bm}分{bs:02d}秒）", text_color="green"
+                text=f"完了！ {success_count}件処理（{bm}分{bs:02d}秒）",
+                text_color="#BBF7D0",
+                fg_color="#12351F"
             )
         else:
             self._batch_status_label.configure(
                 text=f"完了（成功: {success_count}件 / 失敗: {error_count}件）"
             )
             self.status_label.configure(
-                text=f"完了（一部エラー）{bm}分{bs:02d}秒", text_color="orange"
+                text=f"完了（一部エラー）{bm}分{bs:02d}秒",
+                text_color="#FDBA74",
+                fg_color="#3B2412"
             )
 
         # サマリーテキスト生成
@@ -807,6 +1176,98 @@ class WhisperApp(ctk.CTk):
 
         if self._batch_results:
             self.open_file_button.configure(state="normal")
+            if self.summary_enabled_var.get():
+                self._start_summary_generation()
+
+    # ==================== AIサマリー ====================
+    def _start_summary_generation(self):
+        if self._summary_running:
+            return
+        self.summary_settings["summary_enabled"] = True
+        save_settings(self.summary_settings)
+        settings = self.summary_settings.copy()
+        self._summary_running = True
+        self.run_button.configure(state="disabled")
+        self.model_menu.configure(state="disabled")
+        self.clear_files_button.configure(state="disabled")
+        self.summary_switch.configure(state="disabled")
+        self.summary_settings_button.configure(state="disabled")
+        self._refresh_file_list()
+        backend = settings.get("backend", "ollama")
+        model = settings.get("model") or BACKEND_DEFAULT_MODELS.get(backend, "llama3.1")
+        self.status_label.configure(
+            text=f"AIサマリー生成中...（{backend} / {model}）",
+            text_color="#BFDBFE",
+            fg_color="#172554"
+        )
+        self.show_summary("AIサマリーを生成中です...\n\n文字起こし結果は保存済みです。")
+        thread = threading.Thread(
+            target=self._run_summary_generation,
+            args=(settings,),
+            daemon=True
+        )
+        thread.start()
+
+    def _run_summary_generation(self, settings):
+        lines = []
+        errors = []
+        for idx, result in enumerate(self._batch_results, start=1):
+            name = os.path.basename(result["file"])
+            self.after(
+                0,
+                self._update_batch_status,
+                idx,
+                len(self._batch_results),
+                result["file"]
+            )
+            try:
+                summary = summarize_text(result.get("text", ""), settings)
+                if not summary:
+                    summary = "サマリーが空でした。"
+                summary_path = os.path.splitext(result["file"])[0] + "_サマリー.txt"
+                with open(summary_path, "w", encoding="utf-8") as f:
+                    f.write(summary)
+                result["summary_output"] = summary_path
+                self._summary_output_path = summary_path
+                lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+                lines.append(f"  {name}")
+                lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+                lines.append(summary)
+                lines.append("")
+                self.after(0, self.show_summary, "\n".join(lines))
+            except Exception as e:
+                message = str(e)
+                errors.append({"file": result["file"], "error": message})
+                lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+                lines.append(f"  {name}")
+                lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
+                lines.append("サマリー生成に失敗しました。")
+                lines.append(message)
+                lines.append("")
+                self.after(0, self.show_summary, "\n".join(lines))
+
+        self.after(0, self._on_summary_complete, errors)
+
+    def _on_summary_complete(self, errors):
+        self._summary_running = False
+        self.run_button.configure(state="normal")
+        self.model_menu.configure(state="normal")
+        self.clear_files_button.configure(state="normal")
+        self.summary_switch.configure(state="normal")
+        self.summary_settings_button.configure(state="normal")
+        self._refresh_file_list()
+        if errors:
+            self.status_label.configure(
+                text=f"文字起こし完了 / サマリーは{len(errors)}件失敗",
+                text_color="#FDBA74",
+                fg_color="#3B2412"
+            )
+        else:
+            self.status_label.configure(
+                text="文字起こし完了 / AIサマリー保存完了",
+                text_color="#BBF7D0",
+                fg_color="#12351F"
+            )
 
     # ==================== 履歴 ====================
     def load_history_display(self):
