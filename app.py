@@ -1148,30 +1148,22 @@ class WhisperApp(ctk.CTk):
                 fg_color="#3B2412"
             )
 
-        # サマリーテキスト生成
-        summary_lines = [
-            "━━━━━━━━━━━━━━━━━━━━━━━━",
-            "  バッチ処理完了",
-            "━━━━━━━━━━━━━━━━━━━━━━━━",
-            "",
-            f"総所要時間: {bm}分{bs:02d}秒",
-            f"成功: {success_count}件 / 失敗: {error_count}件",
-            "",
-        ]
-
+        # 「文字起こし」タブには文字起こし本文を表示する（複数ファイルはヘッダ付きで連結）
+        preview_parts = []
+        multi = len(self._batch_results) > 1
         for r in self._batch_results:
-            fm = int(r["elapsed"] // 60)
-            fs = int(r["elapsed"] % 60)
-            summary_lines.append(f"✓ {os.path.basename(r['file'])}")
-            summary_lines.append(f"  → {os.path.basename(r['output'])}（{fm}分{fs:02d}秒）")
-            summary_lines.append("")
+            text = (r.get("text") or "").strip()
+            if multi:
+                preview_parts.append(f"━━━ {os.path.basename(r['file'])} ━━━")
+            preview_parts.append(text if text else "(本文が空でした)")
+            preview_parts.append("")
 
+        # 失敗したファイルは末尾に注記
         for e in self._batch_errors:
-            summary_lines.append(f"✗ {os.path.basename(e['file'])}")
-            summary_lines.append(f"  エラー: {e['error']}")
-            summary_lines.append("")
+            preview_parts.append(f"✗ {os.path.basename(e['file'])} — エラー: {e['error']}")
 
-        self.show_preview("\n".join(summary_lines))
+        body = "\n".join(preview_parts).strip()
+        self.show_preview(body if body else "文字起こし結果がありません")
         self.progress.set(1)
 
         if self._batch_results:
