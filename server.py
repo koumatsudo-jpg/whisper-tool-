@@ -75,8 +75,8 @@ class _State:
         self.job_diarize: bool = True
         self.job_turbo: bool = True
         self.job_lightweight: bool = False
-        # SSE
-        self._event_queue: Optional[asyncio.Queue] = None
+        # SSE: 複数接続(複数タブ/端末)にブロードキャストするため購読者キューの集合を持つ
+        self._subscribers: set = set()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
 
@@ -84,9 +84,11 @@ st = _State()
 
 
 def _push(event: dict):
-    """Send an SSE event from any thread."""
-    if st._event_queue and st._loop and st._loop.is_running():
-        asyncio.run_coroutine_threadsafe(st._event_queue.put(event), st._loop)
+    """Send an SSE event to ALL connected clients from any thread."""
+    if not (st._loop and st._loop.is_running()):
+        return
+    for q in list(st._subscribers):
+        asyncio.run_coroutine_threadsafe(q.put(event), st._loop)
 
 
 def _resolve_output_path(source_file: str, suffix: str, settings: dict) -> str:
@@ -181,7 +183,8 @@ def _process_one_file(file_path: str, model_size: str) -> tuple[str, str]:
     # Step 1: WAV conversion
     if ext != WAV_EXT:
         _push({"type": "progress_detail", "message": f"{fname}: WAV変換中..."})
-        tmp = tempfile.mktemp(suffix=".wav")
+        fd, tmp = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
         st.temp_files.append(tmp)
         extract_audio(file_path, tmp)
         audio_path = tmp
@@ -637,7 +640,8 @@ def get_history_entry(entry_id: str):
 @app.post("/api/history/{entry_id}/open")
 def open_history_file(entry_id: str):
     for e in load_history():
-        if e.get("id") == entry_id:
+        eid = e.get("id") or f"legacy_{e.get('timestamp','').replace(' ','_').replace(':','')}_{os.path.basename(e.get('file','unknown'))}"
+        if eid == entry_id:
             path = e.get("output")
             if path and os.path.exists(path):
                 subprocess.run(["open", path])
@@ -755,8 +759,8 @@ def browse_folder(path: Optional[str] = None):
 @app.get("/api/events")
 async def events():
     queue: asyncio.Queue = asyncio.Queue()
-    st._event_queue = queue
     st._loop = asyncio.get_event_loop()
+    st._subscribers.add(queue)
 
     async def generate() -> AsyncGenerator[str, None]:
         try:
@@ -768,6 +772,9 @@ async def events():
                     yield 'data: {"type":"ping"}\n\n'
         except asyncio.CancelledError:
             pass
+        finally:
+            # 接続が切れたら購読者から外す（リーク防止）
+            st._subscribers.discard(queue)
 
     return StreamingResponse(
         generate(),
