@@ -4,10 +4,22 @@ settings.json
 
 # テスト用音声
 test.wav
+*.wav
+*.mp3
+*.m4a
+*.mp4
+
+# モデル（巨大バイナリ・再DL可能なので追跡しない）
+mlx_models/
+*.bin
+*.safetensors
 
 # 生成物
 *_文字起こし.txt
 *_サマリー.txt
+文字起こし/
+nohup.out
+*.log
 
 # Python
 __pycache__/
