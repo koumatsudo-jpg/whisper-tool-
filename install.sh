@@ -72,22 +72,25 @@ echo "▶ パッケージをインストール中..."
 echo "  （合計10〜20分かかることがあります。そのままお待ちください）"
 echo ""
 
-echo "  [1/6] torch（AI エンジン）..."
+echo "  [1/7] torch（AI エンジン）..."
 pip install --quiet torch
 
-echo "  [2/6] mlx-whisper（文字起こし / Apple Silicon 最適化）..."
+echo "  [2/7] mlx-whisper（文字起こし / Apple Silicon 最適化）..."
 pip install --quiet mlx-whisper
 
-echo "  [3/6] pyannote.audio（話者分離）..."
+echo "  [3/7] pyannote.audio（話者分離 / community-1）..."
 pip install --quiet "pyannote.audio"
 
-echo "  [4/6] customtkinter（画面）..."
-pip install --quiet customtkinter
+echo "  [4/7] WebUI（fastapi / uvicorn / python-docx）..."
+pip install --quiet fastapi uvicorn python-docx
 
-echo "  [5/6] tkinterdnd2（ドラッグ＆ドロップ）..."
+echo "  [5/7] customtkinter（デスクトップ版の画面・任意）..."
+pip install --quiet customtkinter || echo "  ※ customtkinter は省略（WebUI版のみ使うなら不要）"
+
+echo "  [6/7] tkinterdnd2（ドラッグ＆ドロップ・任意）..."
 pip install --quiet tkinterdnd2 || echo "  ※ tkinterdnd2 は省略（なくても動作します）"
 
-echo "  [6/6] psutil（メモリ自動判定）..."
+echo "  [7/7] psutil（メモリ自動判定）..."
 pip install --quiet psutil || echo "  ※ psutil は省略（軽量モードの自動判定だけ無効）"
 
 echo ""
@@ -128,7 +131,8 @@ cat > "$LAUNCHER" << EOF
 #!/bin/bash
 source "$VENV_DIR/bin/activate"
 cd "$TOOL_DIR"
-python app.py
+# WebUI版を起動（自動でブラウザ http://localhost:8080 が開きます）
+python server.py
 EOF
 chmod +x "$LAUNCHER"
 
@@ -144,8 +148,11 @@ echo "  セットアップ完了！"
 echo "======================================"
 echo ""
 echo "  デスクトップの「文字起こし.command」をダブルクリックして起動してください"
+echo "  → 自動でブラウザ（http://localhost:8080）が開き、WebUI が表示されます"
+echo "  ※ 黒いターミナル画面は閉じないでください（閉じるとツールが止まります）"
 echo ""
 echo "  ⚠️  初回起動時のみ、AIモデルのダウンロードが自動で始まります"
-echo "     （large-v3-turbo で約800MB、初回は5〜10分）完了すると自動でツールが開きます"
+echo "     （文字起こし large-v3-turbo 約800MB ＋ 話者分離 community-1。初回は5〜10分）"
+echo "     完了すると WebUI が使えるようになります"
 echo "     ※ モデルは ~/.cache/huggingface/hub にキャッシュされます"
 echo ""
