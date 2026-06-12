@@ -1,0 +1,1911 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>文字起こしツール</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%239ED4F2'/%3E%3Ctext x='32' y='43' text-anchor='middle' font-size='34' font-family='Arial' fill='%23143A5C'%3E%E2%99%AA%3C/text%3E%3C/svg%3E">
+  <style>
+    :root {
+      --blue: #9ED4F2;
+      --blue-strong: #2F80ED;
+      --navy: #143A5C;
+      --yellow: #F2B33D;
+      --pale: #E5F4FC;
+      --bg: #F6FBFF;
+      --card: #FFFFFF;
+      --ink: #13253A;
+      --muted: #65758B;
+      --line: #D8E7F3;
+      --line-strong: #B9D9EE;
+      --success: #0F9F6E;
+      --danger: #D64545;
+      --shadow: 0 12px 30px rgba(20, 58, 92, 0.1);
+      --radius: 14px;
+      color-scheme: light;
+      font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      min-width: 760px;
+      background: var(--bg);
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        linear-gradient(180deg, rgba(158, 212, 242, 0.42), rgba(246, 251, 255, 0) 260px),
+        var(--bg);
+    }
+
+    button,
+    input,
+    select,
+    textarea {
+      font: inherit;
+    }
+
+    button {
+      border: 0;
+      cursor: pointer;
+      transition: transform 0.15s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+    }
+
+    button:hover:not(:disabled) {
+      transform: translateY(-1px);
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.48;
+    }
+
+    button:focus-visible,
+    input:focus-visible,
+    select:focus-visible,
+    textarea:focus-visible {
+      outline: 3px solid rgba(47, 128, 237, 0.28);
+      outline-offset: 2px;
+    }
+
+    .app {
+      width: min(960px, calc(100vw - 32px));
+      margin: 12px auto 24px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .topbar {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 14px;
+      border: 2px solid var(--navy);
+      border-radius: 18px;
+      background: var(--card);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .topbar::after {
+      content: "";
+      position: absolute;
+      left: 16px;
+      bottom: 7px;
+      width: 190px;
+      height: 8px;
+      border-bottom: 4px solid var(--yellow);
+      border-radius: 50%;
+      transform: rotate(-1.5deg);
+      opacity: 0.85;
+      pointer-events: none;
+    }
+
+    .brand {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .brand-mark {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border: 2px solid var(--navy);
+      border-radius: 13px;
+      background: var(--blue);
+      color: var(--navy);
+      font-size: 22px;
+      font-weight: 900;
+      transform: rotate(-4deg);
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 20px;
+      line-height: 1.1;
+      letter-spacing: 0;
+      font-weight: 900;
+    }
+
+    .subtitle {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .header-actions {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .status-pill {
+      min-width: 128px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      background: var(--pale);
+      color: var(--navy);
+      font-size: 12px;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      box-shadow: 0 0 0 4px rgba(101, 117, 139, 0.14);
+    }
+
+    .status-pill.running .dot {
+      background: var(--blue-strong);
+      box-shadow: 0 0 0 4px rgba(47, 128, 237, 0.16);
+    }
+
+    .status-pill.success .dot {
+      background: var(--success);
+      box-shadow: 0 0 0 4px rgba(15, 159, 110, 0.16);
+    }
+
+    .status-pill.error .dot {
+      background: var(--danger);
+      box-shadow: 0 0 0 4px rgba(214, 69, 69, 0.16);
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 440px minmax(0, 1fr);
+      gap: 10px;
+      align-items: start;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, #F8FCFF, #EFF8FE);
+    }
+
+    .panel-title {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 900;
+      color: var(--navy);
+    }
+
+    .panel-body {
+      padding: 10px;
+    }
+
+    .stack {
+      display: grid;
+      gap: 10px;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .row.wrap {
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      min-height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      border: 1px solid #BFE2F5;
+      border-radius: 10px;
+      padding: 7px 10px;
+      background: #EFF9FE;
+      color: var(--navy);
+      font-size: 12px;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+
+    .btn:hover:not(:disabled) {
+      background: #E1F3FD;
+      border-color: #9ED4F2;
+    }
+
+    .btn.primary {
+      border-color: var(--navy);
+      background: var(--navy);
+      color: #fff;
+      box-shadow: 0 8px 18px rgba(20, 58, 92, 0.18);
+    }
+
+    .btn.primary:hover:not(:disabled) {
+      background: #0D2D4D;
+    }
+
+    .btn.yellow {
+      border-color: #E1A62C;
+      background: var(--yellow);
+      color: #3A2A08;
+    }
+
+    .btn.danger {
+      border-color: #F4B8B8;
+      background: #FFF4F4;
+      color: var(--danger);
+    }
+
+    .btn.ghost {
+      border-color: #D6E3EE;
+      background: #F7FAFD;
+      color: var(--muted);
+    }
+
+    .btn.small {
+      min-height: 28px;
+      padding: 5px 8px;
+      font-size: 11px;
+      border-radius: 8px;
+    }
+
+    .field {
+      display: grid;
+      gap: 6px;
+    }
+
+    .field label {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    input,
+    select,
+    textarea {
+      width: 100%;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      color: var(--ink);
+      padding: 7px 9px;
+      outline: none;
+    }
+
+    textarea {
+      min-height: 54px;
+      resize: vertical;
+      line-height: 1.5;
+    }
+
+    input::placeholder,
+    textarea::placeholder {
+      color: #98A8BA;
+    }
+
+    .dropzone {
+      min-height: 86px;
+      display: grid;
+      grid-template-columns: 48px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      padding: 10px;
+      border: 2px dashed #9ED4F2;
+      border-radius: 14px;
+      background: #F3FBFF;
+    }
+
+    .dropzone.dragging {
+      border-color: var(--yellow);
+      background: #FFF8E8;
+    }
+
+    .drop-icon {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border: 2px solid var(--navy);
+      border-radius: 12px;
+      background: #fff;
+      color: var(--navy);
+      font-size: 22px;
+      font-weight: 900;
+      transform: rotate(-3deg);
+    }
+
+    .drop-title {
+      font-size: 14px;
+      font-weight: 900;
+      color: var(--navy);
+    }
+
+    .drop-sub {
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .section-title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 7px;
+    }
+
+    .section-title h3 {
+      margin: 0;
+      color: var(--navy);
+      font-size: 13px;
+      font-weight: 900;
+    }
+
+    .search-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .candidate-list,
+    .staging-list,
+    .history-list {
+      display: grid;
+      gap: 7px;
+      overflow: auto;
+      padding-right: 2px;
+    }
+
+    .candidate-list {
+      max-height: 260px;
+    }
+
+    .staging-list {
+      max-height: 164px;
+    }
+
+    .history-list {
+      max-height: 442px;
+    }
+
+    .file-row,
+    .history-row {
+      display: grid;
+      grid-template-columns: 24px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #fff;
+      animation: fade-in 0.25s ease both;
+    }
+
+    .file-row.added {
+      background: #F3F6FA;
+      color: #7A8796;
+    }
+
+    .file-icon {
+      width: 24px;
+      height: 24px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: var(--pale);
+      font-size: 13px;
+    }
+
+    .file-name,
+    .history-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .file-meta,
+    .history-meta {
+      margin-top: 2px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .meta-chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: var(--pale);
+      color: var(--navy);
+      font-size: 11px;
+      font-weight: 900;
+    }
+
+    .empty {
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .summary-strip {
+      display: grid;
+      gap: 4px;
+      padding: 9px 10px;
+      border: 1px solid var(--line-strong);
+      border-radius: 12px;
+      background: #F8FCFF;
+      color: var(--navy);
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .summary-strip small {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+    }
+
+    .options {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 92px 92px 92px;
+      gap: 8px;
+      align-items: end;
+    }
+
+    .switch {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 7px;
+      min-height: 34px;
+      padding: 6px 8px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 900;
+    }
+
+    .switch input {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .knob {
+      width: 34px;
+      height: 20px;
+      flex: 0 0 auto;
+      border-radius: 999px;
+      background: #CBD7E2;
+      padding: 3px;
+      transition: background 0.15s ease;
+    }
+
+    .knob::before {
+      content: "";
+      display: block;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #fff;
+      transition: transform 0.15s ease;
+    }
+
+    .switch input:checked + .knob {
+      background: var(--blue-strong);
+    }
+
+    .switch input:checked + .knob::before {
+      transform: translateX(14px);
+    }
+
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 122px;
+      gap: 8px;
+    }
+
+    .progress-track {
+      height: 13px;
+      border-radius: 999px;
+      background: #DDEBF5;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, var(--blue-strong), var(--yellow));
+      transition: width 0.24s ease;
+    }
+
+    .progress-meta {
+      display: grid;
+      gap: 3px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .progress-message {
+      color: var(--navy);
+      font-weight: 900;
+      min-height: 18px;
+    }
+
+    .tabs {
+      display: grid;
+    }
+
+    .tabbar {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 10px 0;
+      border-bottom: 1px solid var(--line);
+      background: #F8FCFF;
+    }
+
+    .tab-button {
+      min-height: 35px;
+      padding: 7px 10px;
+      border: 1px solid transparent;
+      border-bottom: 0;
+      border-radius: 10px 10px 0 0;
+      background: transparent;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .tab-button.active {
+      border-color: var(--line);
+      background: #fff;
+      color: var(--navy);
+      box-shadow: inset 0 3px 0 var(--blue);
+    }
+
+    .tab-tools {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .tab-pane {
+      display: none;
+      padding: 10px;
+    }
+
+    .tab-pane.active {
+      display: block;
+      animation: fade-in 0.25s ease both;
+    }
+
+    .result-box {
+      width: 100%;
+      height: 448px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #FBFEFF;
+      color: var(--ink);
+      padding: 12px;
+      white-space: pre-wrap;
+      line-height: 1.72;
+      font-family: "Noto Sans JP", "Hiragino Sans", "Yu Gothic", sans-serif;
+      font-size: 13px;
+      tab-size: 2;
+    }
+
+    dialog {
+      width: min(700px, calc(100vw - 44px));
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 0;
+      color: var(--ink);
+      background: #fff;
+      box-shadow: 0 22px 70px rgba(20, 58, 92, 0.22);
+    }
+
+    dialog::backdrop {
+      background: rgba(20, 58, 92, 0.22);
+      backdrop-filter: blur(5px);
+    }
+
+    .modal-head,
+    .modal-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      background: #F8FCFF;
+    }
+
+    .modal-foot {
+      border-top: 1px solid var(--line);
+      border-bottom: 0;
+      justify-content: flex-end;
+    }
+
+    .modal-title {
+      margin: 0;
+      color: var(--navy);
+      font-size: 16px;
+      font-weight: 900;
+    }
+
+    .modal-body {
+      display: grid;
+      gap: 12px;
+      padding: 14px;
+    }
+
+    .modal-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .radio-group {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .radio-card {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-height: 38px;
+      padding: 8px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      color: var(--navy);
+      font-size: 12px;
+      font-weight: 900;
+    }
+
+    .output-preview {
+      padding: 10px;
+      border: 1px dashed var(--line-strong);
+      border-radius: 12px;
+      background: #F8FCFF;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+
+    .modal-result {
+      height: 500px;
+      overflow: auto;
+      white-space: pre-wrap;
+      line-height: 1.72;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #FBFEFF;
+      padding: 12px;
+      font-size: 13px;
+    }
+
+    .toast-wrap {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      z-index: 50;
+      display: grid;
+      gap: 8px;
+      width: min(420px, calc(100vw - 36px));
+    }
+
+    .toast {
+      border: 1px solid var(--line);
+      border-left: 5px solid var(--blue-strong);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: #fff;
+      box-shadow: var(--shadow);
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 800;
+      animation: slide-in 0.2s ease both;
+    }
+
+    .toast.error {
+      border-left-color: var(--danger);
+    }
+
+    .toast.success {
+      border-left-color: var(--success);
+    }
+
+    .log-line {
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.45;
+      font-weight: 700;
+    }
+
+    @keyframes fade-in {
+      from {
+        opacity: 0;
+        transform: translateY(3px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes slide-in {
+      from {
+        opacity: 0;
+        transform: translateY(8px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @media (max-width: 980px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .result-box,
+      .history-list {
+        height: 400px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">♪</div>
+        <div>
+          <h1>文字起こしツール</h1>
+          <div class="subtitle">候補から選んで、まとめて文字起こし</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div id="connectionStatus" class="status-pill">
+          <span class="dot"></span>
+          <span id="connectionLabel">接続中</span>
+        </div>
+        <button id="settingsOpen" class="btn">設定</button>
+      </div>
+    </header>
+
+    <section class="layout">
+      <div class="stack">
+        <section class="panel">
+          <div class="panel-header">
+            <h2 class="panel-title">ファイルを追加</h2>
+            <button id="rescanCandidates" class="btn small">↻ 再スキャン</button>
+          </div>
+          <div class="panel-body stack">
+            <div id="dropzone" class="dropzone">
+              <div class="drop-icon">+</div>
+              <div>
+                <div class="drop-title">ここにD&D</div>
+                <div class="drop-sub">候補リストに無いファイルはパス追加も使えます</div>
+              </div>
+              <button id="filePick" class="btn small">ファイルを選択</button>
+              <input id="fileInput" type="file" accept=".wav,.mp3,.m4a,.mp4,.mov,.flac,.aac,.mkv,.avi" multiple hidden>
+            </div>
+
+            <div class="field">
+              <label for="pathInput">ローカルパス</label>
+              <div class="search-row">
+                <input id="pathInput" type="text" spellcheck="false" placeholder="/Users/name/audio.m4a">
+                <button id="addPaths" class="btn small">追加</button>
+              </div>
+            </div>
+
+            <div>
+              <div class="section-title">
+                <h3>候補ファイル</h3>
+                <span id="candidateCount" class="meta-chip">0件</span>
+              </div>
+              <div class="search-row">
+                <input id="candidateSearch" type="search" placeholder="ファイル名で検索">
+                <button id="clearCandidateSearch" class="btn small ghost">解除</button>
+              </div>
+              <div id="candidateList" class="candidate-list"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2 class="panel-title">追加済み</h2>
+            <button id="clearFiles" class="btn small ghost">全クリア</button>
+          </div>
+          <div class="panel-body stack">
+            <div id="stagingList" class="staging-list"></div>
+            <div id="stagingSummary" class="summary-strip">
+              <span>合計 0:00:00 → 約0分</span>
+              <small>モデルを選ぶと概算が更新されます</small>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2 class="panel-title">実行</h2>
+            <span id="fileCount" class="meta-chip">0 files</span>
+          </div>
+          <div class="panel-body stack">
+            <div class="options">
+              <div class="field">
+                <label for="modelSelect">モデル</label>
+                <select id="modelSelect"></select>
+              </div>
+              <label class="switch">
+                <span>話者</span>
+                <input id="diarizeToggle" type="checkbox" checked>
+                <span class="knob"></span>
+              </label>
+              <label class="switch">
+                <span>高速</span>
+                <input id="turboToggle" type="checkbox" checked>
+                <span class="knob"></span>
+              </label>
+              <label class="switch">
+                <span>軽量</span>
+                <input id="lightweightToggle" type="checkbox">
+                <span class="knob"></span>
+              </label>
+            </div>
+
+            <div class="actions">
+              <button id="startJob" class="btn primary">▶ 文字起こし開始</button>
+              <button id="cancelJob" class="btn danger" disabled>■ キャンセル</button>
+            </div>
+
+            <div class="stack" style="gap: 6px;">
+              <div class="progress-track">
+                <div id="progressFill" class="progress-fill"></div>
+              </div>
+              <div class="progress-meta">
+                <div class="row">
+                  <strong id="progressPct">0%</strong>
+                  <span id="elapsedLabel">経過 00:00</span>
+                </div>
+                <div id="progressMessage" class="progress-message">待機中</div>
+                <div id="detailLog" class="log-line"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <section class="panel tabs">
+        <div class="tabbar">
+          <button class="tab-button active" data-tab="transcript">文字起こし</button>
+          <button class="tab-button" data-tab="summary">サマリー</button>
+          <button class="tab-button" data-tab="history">履歴</button>
+          <div class="tab-tools">
+            <button id="copyActive" class="btn small ghost">コピー</button>
+            <button id="openActiveWindow" class="btn small ghost">全文表示</button>
+          </div>
+        </div>
+        <div id="tab-transcript" class="tab-pane active">
+          <pre id="transcriptBox" class="result-box empty">文字起こし結果がありません</pre>
+        </div>
+        <div id="tab-summary" class="tab-pane">
+          <div class="row wrap" style="margin-bottom: 8px;">
+            <button id="regenSummary" class="btn small">サマリー再生成</button>
+            <span id="summaryHint" class="log-line"></span>
+          </div>
+          <pre id="summaryBox" class="result-box empty">サマリーはまだありません</pre>
+        </div>
+        <div id="tab-history" class="tab-pane">
+          <div id="historyList" class="history-list"></div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="settingsDialog">
+    <form method="dialog">
+      <div class="modal-head">
+        <h2 class="modal-title">設定</h2>
+        <button class="btn small ghost" value="cancel">閉じる</button>
+      </div>
+      <div class="modal-body">
+        <label class="switch" style="justify-content:flex-start; width: 190px;">
+          <span>サマリー</span>
+          <input id="summaryEnabled" type="checkbox">
+          <span class="knob"></span>
+        </label>
+
+        <div class="modal-grid">
+          <div class="field">
+            <label for="backendSelect">バックエンド</label>
+            <select id="backendSelect">
+              <option value="ollama">ollama</option>
+              <option value="claude">claude</option>
+              <option value="openai">openai</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="summaryModel">サマリーモデル</label>
+            <input id="summaryModel" type="text" autocomplete="off">
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="apiKeyInput">APIキー</label>
+          <input id="apiKeyInput" type="password" autocomplete="off">
+          <div id="settingsNote" class="log-line"></div>
+        </div>
+
+        <div class="field">
+          <label>出力形式</label>
+          <div class="radio-group">
+            <label class="radio-card"><input type="radio" name="outputFormat" value="txt"> txt</label>
+            <label class="radio-card"><input type="radio" name="outputFormat" value="md"> md</label>
+            <label class="radio-card"><input type="radio" name="outputFormat" value="docx"> docx</label>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="outputDirInput">出力フォルダ</label>
+          <input id="outputDirInput" type="text" spellcheck="false" placeholder="空欄の場合: 入力ファイルと同じフォルダに「文字起こし」フォルダを作成">
+        </div>
+
+        <div id="outputPreview" class="output-preview"></div>
+      </div>
+      <div class="modal-foot">
+        <button id="settingsSave" class="btn primary" value="default">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="viewerDialog">
+    <div class="modal-head">
+      <h2 id="viewerTitle" class="modal-title">全文表示</h2>
+      <button id="viewerClose" class="btn small ghost">閉じる</button>
+    </div>
+    <div class="modal-body">
+      <pre id="viewerText" class="modal-result"></pre>
+    </div>
+    <div class="modal-foot">
+      <button id="viewerCopy" class="btn">コピー</button>
+    </div>
+  </dialog>
+
+  <div id="toastWrap" class="toast-wrap"></div>
+
+  <script>
+    const els = {
+      connectionStatus: document.getElementById("connectionStatus"),
+      connectionLabel: document.getElementById("connectionLabel"),
+      settingsOpen: document.getElementById("settingsOpen"),
+      settingsDialog: document.getElementById("settingsDialog"),
+      settingsSave: document.getElementById("settingsSave"),
+      summaryEnabled: document.getElementById("summaryEnabled"),
+      backendSelect: document.getElementById("backendSelect"),
+      summaryModel: document.getElementById("summaryModel"),
+      apiKeyInput: document.getElementById("apiKeyInput"),
+      settingsNote: document.getElementById("settingsNote"),
+      outputDirInput: document.getElementById("outputDirInput"),
+      outputPreview: document.getElementById("outputPreview"),
+      dropzone: document.getElementById("dropzone"),
+      filePick: document.getElementById("filePick"),
+      fileInput: document.getElementById("fileInput"),
+      pathInput: document.getElementById("pathInput"),
+      addPaths: document.getElementById("addPaths"),
+      candidateSearch: document.getElementById("candidateSearch"),
+      clearCandidateSearch: document.getElementById("clearCandidateSearch"),
+      rescanCandidates: document.getElementById("rescanCandidates"),
+      candidateList: document.getElementById("candidateList"),
+      candidateCount: document.getElementById("candidateCount"),
+      clearFiles: document.getElementById("clearFiles"),
+      stagingList: document.getElementById("stagingList"),
+      stagingSummary: document.getElementById("stagingSummary"),
+      fileCount: document.getElementById("fileCount"),
+      modelSelect: document.getElementById("modelSelect"),
+      diarizeToggle: document.getElementById("diarizeToggle"),
+      turboToggle: document.getElementById("turboToggle"),
+      lightweightToggle: document.getElementById("lightweightToggle"),
+      startJob: document.getElementById("startJob"),
+      cancelJob: document.getElementById("cancelJob"),
+      progressFill: document.getElementById("progressFill"),
+      progressPct: document.getElementById("progressPct"),
+      elapsedLabel: document.getElementById("elapsedLabel"),
+      progressMessage: document.getElementById("progressMessage"),
+      detailLog: document.getElementById("detailLog"),
+      transcriptBox: document.getElementById("transcriptBox"),
+      summaryBox: document.getElementById("summaryBox"),
+      summaryHint: document.getElementById("summaryHint"),
+      regenSummary: document.getElementById("regenSummary"),
+      historyList: document.getElementById("historyList"),
+      copyActive: document.getElementById("copyActive"),
+      openActiveWindow: document.getElementById("openActiveWindow"),
+      viewerDialog: document.getElementById("viewerDialog"),
+      viewerTitle: document.getElementById("viewerTitle"),
+      viewerText: document.getElementById("viewerText"),
+      viewerClose: document.getElementById("viewerClose"),
+      viewerCopy: document.getElementById("viewerCopy"),
+      toastWrap: document.getElementById("toastWrap")
+    };
+
+    const fallbackSpeedFactors = {
+      "tiny": 0.05,
+      "base": 0.07,
+      "small": 0.12,
+      "medium": 0.2,
+      "distil-large-v3": 0.15,
+      "large-v3-turbo": 0.18
+    };
+
+    const state = {
+      settings: null,
+      candidates: [],
+      files: [],
+      history: [],
+      processing: false,
+      summaryRunning: false,
+      transcript: "",
+      summary: "",
+      activeTab: "transcript",
+      timerStart: null,
+      timerId: null
+    };
+
+    const emptyText = {
+      transcript: "文字起こし結果がありません",
+      summary: "サマリーはまだありません"
+    };
+
+    async function api(path, options = {}) {
+      const init = { headers: { "Content-Type": "application/json" }, ...options };
+      const response = await fetch(path, init);
+      const raw = await response.text();
+      let data = {};
+      if (raw) {
+        try {
+          data = JSON.parse(raw);
+        } catch {
+          data = { message: raw };
+        }
+      }
+      if (!response.ok) {
+        throw new Error(data.detail || data.message || response.statusText);
+      }
+      return data;
+    }
+
+    function toast(message, type = "") {
+      const node = document.createElement("div");
+      node.className = `toast ${type}`;
+      node.textContent = message;
+      els.toastWrap.appendChild(node);
+      window.setTimeout(() => node.remove(), 4200);
+    }
+
+    function setConnection(mode, label) {
+      els.connectionStatus.className = `status-pill ${mode || ""}`.trim();
+      els.connectionLabel.textContent = label;
+    }
+
+    function escapeHtml(value) {
+      return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function basename(path) {
+      return String(path || "").split("/").filter(Boolean).pop() || path || "";
+    }
+
+    function isVideo(path) {
+      return [".mp4", ".mov", ".mkv", ".avi"].some((ext) => String(path).toLowerCase().endsWith(ext));
+    }
+
+    function fileIcon(path) {
+      return isVideo(path) ? "🎬" : "🎵";
+    }
+
+    function hasDuration(seconds) {
+      return Number.isFinite(Number(seconds)) && Number(seconds) > 0;
+    }
+
+    function formatDuration(seconds, fallback = "0:00:00") {
+      if (!hasDuration(seconds)) return fallback;
+      const total = Math.max(0, Math.floor(Number(seconds) || 0));
+      const h = Math.floor(total / 3600);
+      const m = Math.floor((total % 3600) / 60);
+      const s = total % 60;
+      return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+    }
+
+    function selectedModel() {
+      return els.modelSelect.value || state.settings?.recommended_model || "large-v3-turbo";
+    }
+
+    function speedFactor() {
+      const factors = state.settings?.speed_factors || fallbackSpeedFactors;
+      return Number(factors[selectedModel()] ?? fallbackSpeedFactors["large-v3-turbo"]);
+    }
+
+    function estimateSeconds(duration) {
+      return Math.max(0, Number(duration || 0) * speedFactor());
+    }
+
+    function formatEstimate(duration, fallback = "概算未取得") {
+      const seconds = estimateSeconds(duration);
+      if (!seconds) return fallback;
+      if (seconds < 60) return "約1分以内";
+      return `約${Math.ceil(seconds / 60)}分`;
+    }
+
+    function stagedPathSet() {
+      return new Set(state.files.map((f) => f.path));
+    }
+
+    function setTextBox(box, text, empty) {
+      const value = text && text.trim() ? text : empty;
+      box.textContent = value;
+      box.classList.toggle("empty", value === empty);
+    }
+
+    function syncSummaryPlaceholder() {
+      if (state.summary && state.summary.trim()) {
+        setTextBox(els.summaryBox, state.summary, emptyText.summary);
+        return;
+      }
+      const enabled = Boolean(state.settings?.summary_enabled);
+      setTextBox(els.summaryBox, "", enabled ? emptyText.summary : "設定でサマリーをONにしてください");
+    }
+
+    function setBusy(processing, summaryRunning = state.summaryRunning) {
+      state.processing = processing;
+      state.summaryRunning = summaryRunning;
+      const busy = processing || summaryRunning;
+      els.startJob.disabled = busy || state.files.length === 0;
+      els.cancelJob.disabled = !busy;
+      els.rescanCandidates.disabled = busy;
+      els.clearFiles.disabled = busy || state.files.length === 0;
+      els.addPaths.disabled = busy;
+      els.filePick.disabled = busy;
+      els.regenSummary.disabled = busy || !state.transcript;
+      renderCandidates();
+      renderStaging();
+    }
+
+    function renderCandidates() {
+      const query = els.candidateSearch.value.trim().toLowerCase();
+      const staged = stagedPathSet();
+      const list = state.candidates.filter((file) => !query || file.name.toLowerCase().includes(query));
+      els.candidateCount.textContent = `${list.length}件`;
+      els.candidateList.innerHTML = "";
+
+      if (!list.length) {
+        const empty = document.createElement("div");
+        empty.className = "file-row empty";
+        empty.style.gridTemplateColumns = "1fr";
+        empty.textContent = state.candidates.length ? "該当する候補がありません" : "候補ファイルをスキャンしてください";
+        els.candidateList.appendChild(empty);
+        return;
+      }
+
+      list.slice(0, 80).forEach((file) => {
+        const added = staged.has(file.path);
+        const row = document.createElement("div");
+        row.className = `file-row ${added ? "added" : ""}`;
+        row.innerHTML = `
+          <div class="file-icon">${fileIcon(file.path)}</div>
+          <div>
+            <div class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div>
+            <div class="file-meta">${formatDuration(file.duration, "時間未取得")} · ${formatEstimate(file.duration)}</div>
+          </div>
+          <button class="btn small ${added ? "ghost" : "yellow"}" data-add-candidate="${escapeHtml(file.path)}" ${added || state.processing || state.summaryRunning ? "disabled" : ""}>
+            ${added ? "✓ 追加済" : "✚"}
+          </button>
+        `;
+        els.candidateList.appendChild(row);
+      });
+    }
+
+    function renderStaging() {
+      els.fileCount.textContent = `${state.files.length} files`;
+      els.stagingList.innerHTML = "";
+
+      if (!state.files.length) {
+        const empty = document.createElement("div");
+        empty.className = "file-row empty";
+        empty.style.gridTemplateColumns = "1fr";
+        empty.textContent = "追加済みファイルはありません";
+        els.stagingList.appendChild(empty);
+      } else {
+        state.files.forEach((file) => {
+          const row = document.createElement("div");
+          row.className = "file-row";
+          row.innerHTML = `
+            <div class="file-icon">${fileIcon(file.path)}</div>
+            <div>
+              <div class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div>
+              <div class="file-meta">${formatDuration(file.duration, "時間未取得")} · ${formatEstimate(file.duration)}</div>
+            </div>
+            <button class="btn small ghost" data-remove="${file.index}" ${state.processing || state.summaryRunning ? "disabled" : ""}>×</button>
+          `;
+          els.stagingList.appendChild(row);
+        });
+      }
+
+      const totalDuration = state.files.reduce((sum, f) => sum + (Number(f.duration) || 0), 0);
+      const totalEstimate = state.files.reduce((sum, f) => sum + estimateSeconds(f.duration), 0);
+      const totalDurationText = state.files.length && !totalDuration ? "時間未取得" : formatDuration(totalDuration);
+      const estimateText = state.files.length && !totalEstimate
+        ? "概算未取得"
+        : formatEstimate(totalDuration, "約0分");
+      els.stagingSummary.innerHTML = `
+        <span>合計 ${totalDurationText} → ${estimateText}で完了</span>
+        <small>${selectedModel()} / ${state.files.length}件</small>
+      `;
+
+      els.startJob.disabled = state.processing || state.summaryRunning || state.files.length === 0;
+      els.clearFiles.disabled = state.processing || state.summaryRunning || state.files.length === 0;
+    }
+
+    function renderHistory() {
+      els.historyList.innerHTML = "";
+      if (!state.history.length) {
+        const empty = document.createElement("div");
+        empty.className = "history-row empty";
+        empty.style.gridTemplateColumns = "1fr";
+        empty.textContent = "履歴がありません";
+        els.historyList.appendChild(empty);
+        return;
+      }
+
+      state.history.forEach((entry) => {
+        const id = entry.id || "";
+        const name = basename(entry.file || entry.output || "");
+        const time = entry.timestamp || entry.date || "";
+        const row = document.createElement("div");
+        row.className = "history-row";
+        row.innerHTML = `
+          <div class="file-icon">${fileIcon(entry.file || entry.output)}</div>
+          <div>
+            <div class="history-name" title="${escapeHtml(name)}">${escapeHtml(name)}</div>
+            <div class="history-meta">${escapeHtml(time)} · ${escapeHtml(entry.model || "")}</div>
+          </div>
+          <div class="row">
+            <button class="btn small" data-history-view="${escapeHtml(id)}" ${id ? "" : "disabled"}>表示</button>
+            <button class="btn small ghost" data-history-open="${escapeHtml(id)}" ${id ? "" : "disabled"}>Finder</button>
+          </div>
+        `;
+        els.historyList.appendChild(row);
+      });
+    }
+
+    function renderSettings() {
+      if (!state.settings) return;
+      els.summaryEnabled.checked = Boolean(state.settings.summary_enabled);
+      els.backendSelect.value = state.settings.backend || "ollama";
+      els.summaryModel.value = state.settings.model || "";
+      els.apiKeyInput.value = state.settings.api_key || "";
+      els.lightweightToggle.checked = Boolean(state.settings.low_memory);
+      els.outputDirInput.value = state.settings.output_dir || "";
+      const fmt = state.settings.output_format || "txt";
+      document.querySelectorAll("input[name='outputFormat']").forEach((input) => {
+        input.checked = input.value === fmt;
+      });
+      els.summaryHint.textContent = state.settings.summary_enabled
+        ? `${state.settings.backend || "ollama"} / ${state.settings.model || ""}`
+        : "サマリーOFF";
+      els.settingsNote.textContent = els.backendSelect.value === "ollama"
+        ? "ローカルOllamaを使用します。"
+        : "環境変数がある場合はそちらが優先されます。";
+
+      els.modelSelect.innerHTML = "";
+      (state.settings.model_choices || []).forEach((choice) => {
+        const option = document.createElement("option");
+        option.value = choice.value;
+        option.textContent = choice.label;
+        els.modelSelect.appendChild(option);
+      });
+      els.modelSelect.value = state.settings.recommended_model || "large-v3-turbo";
+      updateOutputPreview();
+      syncSummaryPlaceholder();
+    }
+
+    function updateOutputPreview() {
+      const fmt = document.querySelector("input[name='outputFormat']:checked")?.value || state.settings?.output_format || "txt";
+      const dir = els.outputDirInput.value.trim() || "入力ファイルと同じフォルダ";
+      els.outputPreview.textContent = `${dir}/文字起こし/\n  audio1/\n    audio1_文字起こし.${fmt}\n    audio1_サマリー.${fmt}`;
+    }
+
+    async function refreshSettings() {
+      state.settings = await api("/api/settings");
+      renderSettings();
+    }
+
+    async function refreshFiles() {
+      const data = await api("/api/files");
+      state.files = data.files || [];
+      renderStaging();
+      renderCandidates();
+      setBusy(state.processing, state.summaryRunning);
+    }
+
+    async function scanCandidates() {
+      els.rescanCandidates.disabled = true;
+      els.rescanCandidates.textContent = "スキャン中";
+      try {
+        const data = await api("/api/browse/scan");
+        state.candidates = data.files || [];
+        renderCandidates();
+        toast(`${state.candidates.length}件の候補を読み込みました`, "success");
+      } catch (error) {
+        toast(`候補スキャンに失敗しました: ${error.message}`, "error");
+      } finally {
+        els.rescanCandidates.disabled = state.processing || state.summaryRunning;
+        els.rescanCandidates.textContent = "↻ 再スキャン";
+      }
+    }
+
+    async function refreshHistory() {
+      const data = await api("/api/history");
+      state.history = data.entries || [];
+      renderHistory();
+    }
+
+    async function refreshResults() {
+      const [transcript, summary] = await Promise.all([
+        api("/api/transcript"),
+        api("/api/summary")
+      ]);
+      state.transcript = transcript.text || "";
+      state.summary = summary.text || "";
+      setTextBox(els.transcriptBox, state.transcript, emptyText.transcript);
+      syncSummaryPlaceholder();
+    }
+
+    async function refreshStatus() {
+      const status = await api("/api/status");
+      state.processing = Boolean(status.processing);
+      state.summaryRunning = Boolean(status.summary_running);
+      setBusy(state.processing, state.summaryRunning);
+      if (state.processing || state.summaryRunning) {
+        setConnection("running", state.summaryRunning ? "サマリー中" : "処理中");
+      } else {
+        setConnection("", "待機中");
+      }
+    }
+
+    async function addPaths(paths) {
+      const clean = paths.map((p) => p.trim()).filter(Boolean);
+      if (!clean.length) {
+        toast("追加するパスがありません", "error");
+        return;
+      }
+      const data = await api("/api/files", {
+        method: "POST",
+        body: JSON.stringify({ paths: clean })
+      });
+      if (!data.added || !data.added.length) {
+        toast("追加できるファイルがありませんでした", "error");
+      } else {
+        toast(`${data.added.length}件追加しました`, "success");
+      }
+      els.pathInput.value = "";
+      await refreshFiles();
+    }
+
+    function pathsFromFileList(fileList) {
+      return Array.from(fileList || [])
+        .map((file) => file.path || file.webkitRelativePath || "")
+        .filter(Boolean);
+    }
+
+    function pathsFromDrop(event) {
+      const paths = pathsFromFileList(event.dataTransfer.files);
+      const uriList = event.dataTransfer.getData("text/uri-list");
+      if (uriList) {
+        uriList.split("\n").forEach((line) => {
+          const value = line.trim();
+          if (!value || value.startsWith("#")) return;
+          try {
+            const url = new URL(value);
+            if (url.protocol === "file:") paths.push(decodeURIComponent(url.pathname));
+          } catch {
+            if (value.startsWith("/")) paths.push(value);
+          }
+        });
+      }
+      const plain = event.dataTransfer.getData("text/plain");
+      if (plain) {
+        plain.split(/\r?\n/).forEach((line) => {
+          const value = line.trim();
+          if (value.startsWith("/")) paths.push(value);
+        });
+      }
+      return [...new Set(paths)];
+    }
+
+    function setProgress(pct, message) {
+      const value = Math.max(0, Math.min(100, Number(pct) || 0));
+      els.progressFill.style.width = `${value}%`;
+      els.progressPct.textContent = `${Math.round(value)}%`;
+      if (message) els.progressMessage.textContent = message;
+    }
+
+    function startTimer() {
+      stopTimer();
+      state.timerStart = Date.now();
+      updateTimer();
+      state.timerId = window.setInterval(updateTimer, 1000);
+    }
+
+    function stopTimer() {
+      if (state.timerId) window.clearInterval(state.timerId);
+      state.timerId = null;
+    }
+
+    function updateTimer() {
+      if (!state.timerStart) {
+        els.elapsedLabel.textContent = "経過 00:00";
+        return;
+      }
+      const total = Math.floor((Date.now() - state.timerStart) / 1000);
+      const min = String(Math.floor(total / 60)).padStart(2, "0");
+      const sec = String(total % 60).padStart(2, "0");
+      els.elapsedLabel.textContent = `経過 ${min}:${sec}`;
+    }
+
+    async function startJob() {
+      try {
+        state.transcript = "";
+        state.summary = "";
+        setTextBox(els.transcriptBox, "", "文字起こしを開始しました");
+        syncSummaryPlaceholder();
+        setProgress(0, "開始しています");
+        els.detailLog.textContent = "";
+        setBusy(true, false);
+        setConnection("running", "処理中");
+        startTimer();
+        await api("/api/jobs", {
+          method: "POST",
+          body: JSON.stringify({
+            model: selectedModel(),
+            diarize: els.diarizeToggle.checked,
+            turbo: els.turboToggle.checked,
+            lightweight: els.lightweightToggle.checked
+          })
+        });
+      } catch (error) {
+        stopTimer();
+        setBusy(false, false);
+        setConnection("error", "エラー");
+        toast(error.message, "error");
+      }
+    }
+
+    async function cancelJob() {
+      try {
+        els.cancelJob.disabled = true;
+        setProgress(Number(els.progressPct.textContent.replace("%", "")) || 0, "キャンセル中");
+        await api("/api/jobs/current", { method: "DELETE" });
+      } catch (error) {
+        toast(error.message, "error");
+      }
+    }
+
+    async function regenerateSummary() {
+      try {
+        if (!state.transcript) {
+          toast("文字起こしテキストがありません", "error");
+          return;
+        }
+        setBusy(state.processing, true);
+        setConnection("running", "サマリー中");
+        setTextBox(els.summaryBox, "", "サマリー生成中...");
+        switchTab("summary");
+        startTimer();
+        await api("/api/summary/regenerate", {
+          method: "POST",
+          body: JSON.stringify({ transcript: state.transcript })
+        });
+      } catch (error) {
+        setBusy(state.processing, false);
+        setConnection("error", "エラー");
+        toast(error.message, "error");
+      }
+    }
+
+    async function saveSettings() {
+      try {
+        const payload = {
+          summary_enabled: els.summaryEnabled.checked,
+          backend: els.backendSelect.value,
+          model: els.summaryModel.value.trim(),
+          api_key: els.apiKeyInput.value.trim(),
+          output_format: document.querySelector("input[name='outputFormat']:checked")?.value || "txt",
+          output_dir: els.outputDirInput.value.trim()
+        };
+        state.settings = await api("/api/settings", {
+          method: "POST",
+          body: JSON.stringify(payload)
+        });
+        renderSettings();
+        renderCandidates();
+        renderStaging();
+        els.settingsDialog.close();
+        toast("設定を保存しました", "success");
+      } catch (error) {
+        toast(error.message, "error");
+      }
+    }
+
+    async function showHistoryEntry(id) {
+      try {
+        const entry = await api(`/api/history/${encodeURIComponent(id)}`);
+        state.transcript = entry.transcript || "";
+        state.summary = entry.summary || "";
+        setTextBox(els.transcriptBox, state.transcript, emptyText.transcript);
+        setTextBox(els.summaryBox, state.summary, "この履歴にはサマリーがありません");
+        switchTab("transcript");
+        toast("履歴を表示しました", "success");
+      } catch (error) {
+        toast(error.message, "error");
+      }
+    }
+
+    async function openHistoryFile(id) {
+      try {
+        await api(`/api/history/${encodeURIComponent(id)}/open`, { method: "POST" });
+      } catch (error) {
+        toast(error.message, "error");
+      }
+    }
+
+    function switchTab(tab) {
+      state.activeTab = tab;
+      document.querySelectorAll(".tab-button").forEach((button) => {
+        button.classList.toggle("active", button.dataset.tab === tab);
+      });
+      document.querySelectorAll(".tab-pane").forEach((pane) => {
+        pane.classList.toggle("active", pane.id === `tab-${tab}`);
+      });
+    }
+
+    function activeText() {
+      if (state.activeTab === "summary") return state.summary || "";
+      if (state.activeTab === "history") return "";
+      return state.transcript || "";
+    }
+
+    async function copyActiveText(button = els.copyActive) {
+      const text = activeText();
+      if (!text.trim()) {
+        toast("コピーする内容がありません", "error");
+        return;
+      }
+      await navigator.clipboard.writeText(text);
+      const original = button.textContent;
+      button.textContent = "✓ コピー済み";
+      window.setTimeout(() => {
+        button.textContent = original;
+      }, 1400);
+    }
+
+    function openViewer() {
+      const text = activeText();
+      if (!text.trim()) {
+        toast("表示する内容がありません", "error");
+        return;
+      }
+      els.viewerTitle.textContent = state.activeTab === "summary" ? "サマリー" : "文字起こし";
+      els.viewerText.textContent = text;
+      els.viewerDialog.showModal();
+    }
+
+    function handleEvent(event) {
+      if (!event || event.type === "ping") return;
+
+      if (event.type === "status") {
+        setConnection("running", event.state === "summarizing" ? "サマリー中" : "処理中");
+        els.progressMessage.textContent = event.message || "処理中";
+        if (!state.timerId) startTimer();
+        return;
+      }
+
+      if (event.type === "progress") {
+        setBusy(true, false);
+        setConnection("running", "処理中");
+        els.detailLog.textContent = `${event.current || 0}/${event.total || 0} ${event.file || ""}`;
+        return;
+      }
+
+      if (event.type === "progress_pct") {
+        setProgress(event.pct, event.message);
+        return;
+      }
+
+      if (event.type === "progress_detail") {
+        els.detailLog.textContent = event.message || "";
+        return;
+      }
+
+      if (event.type === "transcript") {
+        state.transcript = event.text || "";
+        setTextBox(els.transcriptBox, state.transcript, emptyText.transcript);
+        els.regenSummary.disabled = !state.transcript;
+        return;
+      }
+
+      if (event.type === "complete") {
+        setProgress(100, `完了 ${event.success || 0}件`);
+        stopTimer();
+        setBusy(false, false);
+        setConnection("success", "完了");
+        refreshHistory();
+        if (state.settings?.summary_enabled && state.transcript) {
+          regenerateSummary();
+        }
+        if (event.errors) {
+          toast(`完了しました。エラー ${event.errors}件`, event.errors ? "error" : "success");
+        }
+        return;
+      }
+
+      if (event.type === "summary") {
+        state.summary = event.text || "";
+        setTextBox(els.summaryBox, state.summary, emptyText.summary);
+        return;
+      }
+
+      if (event.type === "summary_complete") {
+        stopTimer();
+        setBusy(false, false);
+        setConnection("success", "完了");
+        setProgress(100, "サマリー保存完了");
+        refreshHistory();
+        toast("サマリーを生成しました", "success");
+        return;
+      }
+
+      if (event.type === "cancelled") {
+        stopTimer();
+        setBusy(false, false);
+        setConnection("", "キャンセル");
+        setProgress(0, "キャンセルしました");
+        return;
+      }
+
+      if (event.type === "file_error") {
+        toast(`${event.file || "file"}: ${event.message || "エラー"}`, "error");
+        return;
+      }
+
+      if (event.type === "error") {
+        stopTimer();
+        setBusy(false, false);
+        setConnection("error", "エラー");
+        toast(event.message || "エラーが発生しました", "error");
+        if (event.detail) els.detailLog.textContent = event.detail.split("\n")[0];
+        return;
+      }
+
+      if (event.type === "history_updated") {
+        refreshHistory();
+      }
+    }
+
+    function connectEvents() {
+      const source = new EventSource("/api/events");
+      source.onopen = () => {
+        if (!state.processing && !state.summaryRunning) setConnection("", "待機中");
+      };
+      source.onerror = () => setConnection("error", "再接続中");
+      source.onmessage = (message) => {
+        try {
+          handleEvent(JSON.parse(message.data));
+        } catch (error) {
+          console.error(error);
+        }
+      };
+    }
+
+    function bindEvents() {
+      els.settingsOpen.addEventListener("click", () => {
+        updateOutputPreview();
+        els.settingsDialog.showModal();
+      });
+      els.settingsSave.addEventListener("click", (event) => {
+        event.preventDefault();
+        saveSettings();
+      });
+      els.backendSelect.addEventListener("change", () => {
+        els.settingsNote.textContent = els.backendSelect.value === "ollama"
+          ? "ローカルOllamaを使用します。"
+          : "環境変数がある場合はそちらが優先されます。";
+      });
+      els.outputDirInput.addEventListener("input", updateOutputPreview);
+      document.querySelectorAll("input[name='outputFormat']").forEach((input) => {
+        input.addEventListener("change", updateOutputPreview);
+      });
+
+      els.modelSelect.addEventListener("change", () => {
+        renderCandidates();
+        renderStaging();
+      });
+
+      els.candidateSearch.addEventListener("input", renderCandidates);
+      els.clearCandidateSearch.addEventListener("click", () => {
+        els.candidateSearch.value = "";
+        renderCandidates();
+      });
+      els.rescanCandidates.addEventListener("click", scanCandidates);
+      els.candidateList.addEventListener("click", async (event) => {
+        const button = event.target.closest("[data-add-candidate]");
+        if (!button) return;
+        await addPaths([button.dataset.addCandidate]);
+      });
+
+      els.filePick.addEventListener("click", () => els.fileInput.click());
+      els.fileInput.addEventListener("change", async () => {
+        const paths = pathsFromFileList(els.fileInput.files);
+        els.fileInput.value = "";
+        if (!paths.length) {
+          toast("ブラウザでは絶対パスを取得できません。候補リストかローカルパスを使ってください。", "error");
+          return;
+        }
+        await addPaths(paths);
+      });
+
+      ["dragenter", "dragover"].forEach((name) => {
+        els.dropzone.addEventListener(name, (event) => {
+          event.preventDefault();
+          els.dropzone.classList.add("dragging");
+        });
+      });
+      ["dragleave", "drop"].forEach((name) => {
+        els.dropzone.addEventListener(name, () => els.dropzone.classList.remove("dragging"));
+      });
+      els.dropzone.addEventListener("drop", async (event) => {
+        event.preventDefault();
+        const paths = pathsFromDrop(event);
+        if (!paths.length) {
+          toast("絶対パスを取得できませんでした。候補リストかローカルパスを使ってください。", "error");
+          return;
+        }
+        await addPaths(paths);
+      });
+
+      els.addPaths.addEventListener("click", () => addPaths(els.pathInput.value.split(/\r?\n|,/)));
+      els.pathInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") addPaths(els.pathInput.value.split(/\r?\n|,/));
+      });
+      els.clearFiles.addEventListener("click", async () => {
+        await api("/api/files", { method: "DELETE" });
+        await refreshFiles();
+      });
+      els.stagingList.addEventListener("click", async (event) => {
+        const button = event.target.closest("[data-remove]");
+        if (!button) return;
+        await api(`/api/files/${button.dataset.remove}`, { method: "DELETE" });
+        await refreshFiles();
+      });
+
+      els.startJob.addEventListener("click", startJob);
+      els.cancelJob.addEventListener("click", cancelJob);
+      els.regenSummary.addEventListener("click", regenerateSummary);
+
+      document.querySelectorAll(".tab-button").forEach((button) => {
+        button.addEventListener("click", () => switchTab(button.dataset.tab));
+      });
+      els.copyActive.addEventListener("click", () => copyActiveText());
+      els.openActiveWindow.addEventListener("click", openViewer);
+      els.viewerClose.addEventListener("click", () => els.viewerDialog.close());
+      els.viewerCopy.addEventListener("click", () => copyActiveText(els.viewerCopy));
+      els.historyList.addEventListener("click", (event) => {
+        const view = event.target.closest("[data-history-view]");
+        const open = event.target.closest("[data-history-open]");
+        if (view) showHistoryEntry(view.dataset.historyView);
+        if (open) openHistoryFile(open.dataset.historyOpen);
+      });
+    }
+
+    async function init() {
+      bindEvents();
+      connectEvents();
+      try {
+        await refreshSettings();
+        await Promise.all([refreshFiles(), refreshHistory(), refreshResults(), refreshStatus()]);
+        await scanCandidates();
+      } catch (error) {
+        setConnection("error", "エラー");
+        toast(error.message, "error");
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
