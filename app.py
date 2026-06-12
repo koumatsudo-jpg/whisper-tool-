@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import urllib.error
 import urllib.request
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 from datetime import datetime
 import traceback
 import time
@@ -30,12 +30,14 @@ SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settin
 DEFAULT_SETTINGS = {
     "summary_enabled": False,
     "backend": "ollama",
-    "model": "llama3.1",
+    "model": "qwen2.5:14b",
     "api_key": "",
+    "output_format": "txt",   # "txt" | "md" | "docx"
+    "output_dir": "",         # "" = 入力ファイルと同じフォルダ内の「文字起こし」サブフォルダ
 }
 
 BACKEND_DEFAULT_MODELS = {
-    "ollama": "llama3.1",
+    "ollama": "qwen2.5:14b",
     "claude": "claude-sonnet-4-6",
     "openai": "gpt-4.1-mini",
 }
@@ -54,6 +56,22 @@ MLX_REPO_MAP = {
     "distil-large-v3": "mlx-community/distil-whisper-large-v3",
     "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
 }
+
+# モデル選択の表示ラベル ↔ 内部名（非エンジニア向けに日本語の説明を付ける）
+MODEL_DISPLAY_CHOICES = [
+    ("最速・精度低（tiny）", "tiny"),
+    ("高速・精度低め（base）", "base"),
+    ("バランス型（small）", "small"),
+    ("精度高め・遅い（medium）", "medium"),
+    ("高精度・速め（distil-large-v3）", "distil-large-v3"),
+    ("最高精度・推奨（large-v3-turbo）", "large-v3-turbo"),
+]
+MODEL_LABEL_TO_NAME = {label: name for label, name in MODEL_DISPLAY_CHOICES}
+MODEL_NAME_TO_LABEL = {name: label for label, name in MODEL_DISPLAY_CHOICES}
+
+
+class CancelledError(Exception):
+    """ユーザーによる処理キャンセル"""
 
 
 def detect_low_memory_default():
@@ -144,17 +162,49 @@ def _json_post(url, payload, headers=None, timeout=60):
 
 def _summary_prompt(transcript):
     return (
-        "以下の会議・会話の文字起こしを日本語で要約してください。\n\n"
-        "出力形式:\n"
-        "1. 議題\n"
-        "2. 決定事項\n"
-        "3. ToDo\n"
-        "4. 発言者ごとの要点\n"
-        "5. 補足・未決事項\n\n"
-        "話者ラベルとタイムスタンプは必要な箇所だけ残してください。\n\n"
+        "以下の会議・会話・商談の文字起こしを日本語で要約してください。\n\n"
+        "厳守事項:\n"
+        "- 文字起こしに書かれている事実だけを使うこと。本文に無い人物名・会議・タスク・担当者・期限・金額を勝手に作らない。\n"
+        "- 推測・憶測・補完をしない。情報が無い項目は『記載なし』と書く。\n"
+        "- 担当・期限・金額・条件は、本文に明記がある場合のみ書く。\n"
+        "- 決定事項には、本文中で明確に合意・決定された事項のみを書く。提案中・検討中・交渉中の事項は『論点・未決事項』に書く。\n"
+        "- 出力はすべて日本語で書く。中国語の簡体字（例: 导・时・报）を使わない。\n\n"
+        "出力形式（Markdown見出し）:\n"
+        "## 概要（2〜3文）\n"
+        "## 決定事項（箇条書き）\n"
+        "## ToDo（担当・期限が本文にあれば付記）\n"
+        "## 論点・未決事項\n\n"
+        "内容が商談・営業の場合は、上記に加えて以下も抽出してください。"
+        "本文に該当する情報がある見出しは必ず含め、無い見出しのみ省略すること:\n"
+        "## 顧客の課題・ニーズ\n"
+        "## 予算・条件・導入時期\n"
+        "## 決裁プロセス・キーパーソン\n"
+        "## 懸念・反対意見\n"
+        "## ネクストアクション（次回の約束・フォロー事項）\n\n"
+        "話者ラベルがある場合は、誰の発言かを必要な箇所だけ明記してください。\n\n"
         "文字起こし:\n"
         f"{transcript}"
     )
+
+
+# ローカルLLM（特にQwen系）が稀に混入させる簡体字を日本語の漢字へ正規化する。
+# 日本語として使われない字のみ対象（誤置換防止）。
+_SIMPLIFIED_TO_JA = str.maketrans({
+    "导": "導", "时": "時", "报": "報", "应": "応", "设": "設",
+    "实": "実", "现": "現", "间": "間", "题": "題", "议": "議",
+    "记": "記", "录": "録", "务": "務", "经": "経", "说": "説",
+    "对": "対", "进": "進", "确": "確", "认": "認", "门": "門",
+    "审": "審", "业": "業", "长": "長", "东": "東", "风": "風",
+    "车": "車", "书": "書", "头": "頭", "处": "処", "价": "価",
+    "优": "優", "质": "質", "总": "総", "结": "結", "构": "構",
+    "终": "終", "转": "転", "开": "開", "闭": "閉", "问": "問",
+    "询": "詢", "验": "験", "检": "検", "续": "続", "单": "単",
+    "见": "見", "贵": "貴", "员": "員",
+})
+
+
+def _normalize_summary_text(text):
+    return text.translate(_SIMPLIFIED_TO_JA)
 
 
 def _api_key_for_backend(backend, settings):
@@ -165,26 +215,123 @@ def _api_key_for_backend(backend, settings):
     return ""
 
 
-def summarize_text(transcript, settings):
+# Ollamaに一度に渡す文字起こしの上限（文字数）。
+# 日本語はおおむね1文字≒1トークンなので、これを超えるとnum_ctxを上げても
+# KVキャッシュのメモリ消費が大きくなりすぎる。超過分は分割要約→統合する。
+_MAX_SUMMARY_INPUT_CHARS = 20000
+
+
+def _merge_summaries_prompt(partial_summaries):
+    return (
+        "以下は同じ会議・会話の文字起こしを前半・後半などに分割して要約したものです。"
+        "重複を整理し、同じ出力形式（Markdown見出し）のまま1つの要約に統合してください。\n\n"
+        "厳守事項:\n"
+        "- 部分要約に書かれている事実だけを使い、新しい情報を加えない。\n"
+        "- 情報が無い項目は『記載なし』と書く。\n"
+        "- 出力はすべて日本語で書く。\n\n"
+        "部分要約:\n"
+        f"{partial_summaries}"
+    )
+
+
+def _ollama_generate(model, prompt, cancel_check=None):
+    # Ollamaのデフォルトnum_ctx(4096)では長い文字起こしでプロンプト先頭の
+    # 指示文が切り捨てられるため、入力長に応じて明示的に確保する。
+    approx_tokens = len(prompt)
+    num_ctx = min(32768, max(8192, approx_tokens + 1500))
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": cancel_check is not None,
+        "options": {"num_ctx": num_ctx},
+    }
+    if cancel_check is None:
+        data = _json_post(
+            "http://localhost:11434/api/generate",
+            payload,
+            timeout=600,
+        )
+        return data.get("response", "").strip()
+
+    request = urllib.request.Request(
+        "http://localhost:11434/api/generate",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    parts = []
+    try:
+        with urllib.request.urlopen(request, timeout=600) as response:
+            for raw_line in response:
+                cancel_check()
+                line = raw_line.decode("utf-8").strip()
+                if not line:
+                    continue
+                data = json.loads(line)
+                if data.get("error"):
+                    raise RuntimeError(data["error"])
+                parts.append(data.get("response", ""))
+                if data.get("done"):
+                    break
+    except CancelledError:
+        raise
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Ollamaエラー: HTTP {e.code}\n{detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(str(e.reason)) from e
+
+    cancel_check()
+    return "".join(parts).strip()
+
+
+def summarize_text(transcript, settings, cancel_check=None):
     backend = settings.get("backend", "ollama")
     model = settings.get("model") or BACKEND_DEFAULT_MODELS.get(backend, "llama3.1")
     prompt = _summary_prompt(transcript)
 
+    def _maybe_cancel():
+        if cancel_check is not None:
+            cancel_check()
+
+    _maybe_cancel()
+
     if backend == "ollama":
         try:
-            data = _json_post(
-                "http://localhost:11434/api/generate",
-                {"model": model, "prompt": prompt, "stream": False},
-                timeout=180,
-            )
+            if len(transcript) <= _MAX_SUMMARY_INPUT_CHARS:
+                _maybe_cancel()
+                result = _ollama_generate(model, prompt, cancel_check=cancel_check)
+                _maybe_cancel()
+            else:
+                chunks = [
+                    transcript[i:i + _MAX_SUMMARY_INPUT_CHARS]
+                    for i in range(0, len(transcript), _MAX_SUMMARY_INPUT_CHARS)
+                ]
+                partials = []
+                for chunk in chunks:
+                    _maybe_cancel()
+                    partials.append(_ollama_generate(
+                        model,
+                        _summary_prompt(chunk),
+                        cancel_check=cancel_check,
+                    ))
+                    _maybe_cancel()
+                _maybe_cancel()
+                result = _ollama_generate(
+                    model,
+                    _merge_summaries_prompt("\n\n---\n\n".join(partials)),
+                    cancel_check=cancel_check,
+                )
+                _maybe_cancel()
         except RuntimeError as e:
             raise RuntimeError(
                 "Ollamaが見つかりません。`brew install ollama` 後に "
                 f"`ollama pull {model}` を実行し、Ollamaを起動してください。\n\n{e}"
             ) from e
-        return data.get("response", "").strip()
+        return _normalize_summary_text(result)
 
     if backend == "claude":
+        _maybe_cancel()
         api_key = _api_key_for_backend("claude", settings)
         if not api_key:
             raise RuntimeError("ANTHROPIC_API_KEY または設定画面のAPIキーを指定してください。")
@@ -201,10 +348,12 @@ def summarize_text(transcript, settings):
             },
             timeout=120,
         )
+        _maybe_cancel()
         parts = data.get("content", [])
         return "\n".join(p.get("text", "") for p in parts if p.get("type") == "text").strip()
 
     if backend == "openai":
+        _maybe_cancel()
         api_key = _api_key_for_backend("openai", settings)
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY または設定画面のAPIキーを指定してください。")
@@ -218,6 +367,7 @@ def summarize_text(transcript, settings):
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=120,
         )
+        _maybe_cancel()
         return data["choices"][0]["message"]["content"].strip()
 
     raise RuntimeError(f"未対応のサマリーAIです: {backend}")
@@ -285,12 +435,16 @@ class WhisperApp(ctk.CTk):
                 HAS_DND = False
 
         self.title("文字起こしツール")
-        self.geometry("750x800")
-        self.resizable(False, False)
+        self.geometry("860x880")
+        self.resizable(True, True)
+        self.minsize(760, 760)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # --- 状態 ---
         self.file_paths = []          # バッチ対象ファイルリスト
         self.processing = False
+        self._cancel_requested = False
+        self._closing = False
         self._temp_files = []
 
         # --- モデルキャッシュ ---
@@ -299,6 +453,7 @@ class WhisperApp(ctk.CTk):
 
         # --- 進捗追跡 ---
         self._elapsed_timer_running = False
+        self._elapsed_after_id = None
         self._start_time = None
         self._file_start_time = None
 
@@ -308,6 +463,7 @@ class WhisperApp(ctk.CTk):
         self._output_path = None
         self._summary_output_path = None
         self._summary_running = False
+        self._summary_cancelled = False
         self.summary_settings = load_settings()
 
         # --- メインコンテナ ---
@@ -373,23 +529,34 @@ class WhisperApp(ctk.CTk):
         ).pack(side="left", padx=(0, 8))
 
         _low_memory_default = detect_low_memory_default()
-        self.model_var = ctk.StringVar(value=recommended_model_for_memory(_low_memory_default))
+        self.model_var = ctk.StringVar(
+            value=MODEL_NAME_TO_LABEL[recommended_model_for_memory(_low_memory_default)]
+        )
         self.model_menu = ctk.CTkOptionMenu(
             self.controls_frame,
             variable=self.model_var,
-            values=["tiny", "base", "small", "medium", "distil-large-v3", "large-v3-turbo"],
-            width=180
+            values=[label for label, _ in MODEL_DISPLAY_CHOICES],
+            width=230
         )
         self.model_menu.pack(side="left")
 
         self.run_button = ctk.CTkButton(
             self.controls_frame, text="文字起こし開始",
             font=ctk.CTkFont(size=14, weight="bold"),
-            height=36, width=180,
+            height=36, width=160,
             fg_color="#2563EB", hover_color="#1D4ED8",
             command=self.start_transcribe
         )
         self.run_button.pack(side="right")
+
+        self.cancel_button = ctk.CTkButton(
+            self.controls_frame, text="キャンセル",
+            font=ctk.CTkFont(size=13),
+            height=36, width=100,
+            fg_color="#7F1D1D", hover_color="#991B1B",
+            command=self.request_cancel, state="disabled"
+        )
+        self.cancel_button.pack(side="right", padx=(0, 8))
 
         # --- モード切替 ---
         self.mode_frame = ctk.CTkFrame(self.input_section, fg_color="transparent")
@@ -513,6 +680,30 @@ class WhisperApp(ctk.CTk):
         )
         self.open_file_button.pack(side="right")
 
+        self.regen_summary_button = ctk.CTkButton(
+            preview_header_frame, text="サマリー再生成",
+            font=ctk.CTkFont(size=12), height=28, width=110,
+            fg_color="#263241", hover_color="#334155",
+            command=self._regenerate_summary, state="disabled"
+        )
+        self.regen_summary_button.pack(side="right", padx=(0, 8))
+
+        self.copy_button = ctk.CTkButton(
+            preview_header_frame, text="コピー",
+            font=ctk.CTkFont(size=12), height=28, width=70,
+            fg_color="#263241", hover_color="#334155",
+            command=self.copy_active_tab
+        )
+        self.copy_button.pack(side="right", padx=(0, 8))
+
+        self.fullscreen_preview_button = ctk.CTkButton(
+            preview_header_frame, text="全文表示",
+            font=ctk.CTkFont(size=12), height=28, width=80,
+            fg_color="#263241", hover_color="#334155",
+            command=self.open_active_tab_window
+        )
+        self.fullscreen_preview_button.pack(side="right", padx=(0, 8))
+
         self.preview_tabs = ctk.CTkTabview(self.preview_section, fg_color="#111827")
         self.preview_tabs.pack(fill="both", expand=True, padx=16, pady=(0, 12))
         self.preview_tabs.add("文字起こし")
@@ -521,14 +712,16 @@ class WhisperApp(ctk.CTk):
         self.preview_text = ctk.CTkTextbox(
             self.preview_tabs.tab("文字起こし"),
             font=ctk.CTkFont(size=12),
-            state="disabled", fg_color="#0B1120"
+            state="disabled", fg_color="#0B1120",
+            height=260, wrap="word"
         )
         self.preview_text.pack(fill="both", expand=True, padx=8, pady=8)
 
         self.summary_text = ctk.CTkTextbox(
             self.preview_tabs.tab("サマリー"),
             font=ctk.CTkFont(size=12),
-            state="disabled", fg_color="#0B1120"
+            state="disabled", fg_color="#0B1120",
+            height=260, wrap="word"
         )
         self.summary_text.pack(fill="both", expand=True, padx=8, pady=8)
 
@@ -797,6 +990,7 @@ class WhisperApp(ctk.CTk):
         )
 
     def start_elapsed_timer(self):
+        self.stop_elapsed_timer()
         self._start_time = time.time()
         self._elapsed_timer_running = True
         self._update_elapsed()
@@ -814,10 +1008,16 @@ class WhisperApp(ctk.CTk):
             fs = int(fe % 60)
             text += f"（ファイル: {fm}分{fs:02d}秒）"
         self.elapsed_label.configure(text=text)
-        self.after(1000, self._update_elapsed)
+        self._elapsed_after_id = self.after(1000, self._update_elapsed)
 
     def stop_elapsed_timer(self):
         self._elapsed_timer_running = False
+        if self._elapsed_after_id is not None:
+            try:
+                self.after_cancel(self._elapsed_after_id)
+            except Exception:
+                pass
+            self._elapsed_after_id = None
 
     # ==================== プレビュー ====================
     def _set_textbox_text(self, textbox, text):
@@ -834,9 +1034,144 @@ class WhisperApp(ctk.CTk):
         self._set_textbox_text(self.summary_text, text)
         self.preview_tabs.set("サマリー")
 
+    # ==================== キャンセル ====================
+    def request_cancel(self):
+        if not (self.processing or self._summary_running):
+            return
+        self._cancel_requested = True
+        self.cancel_button.configure(state="disabled", text="停止中...")
+        self.status_label.configure(
+            text="キャンセル中...（処理の区切りで停止します）",
+            text_color="#FCD34D",
+            fg_color="#3B2F12"
+        )
+        self._log_event("cancel requested")
+
+    def _check_cancel(self):
+        if self._cancel_requested:
+            raise CancelledError()
+
+    def _reset_cancel_button(self):
+        self.cancel_button.configure(state="disabled", text="キャンセル")
+
+    # ==================== コピー / 再生成 / 終了 ====================
+    def copy_active_tab(self):
+        tab = self.preview_tabs.get()
+        textbox = self.summary_text if tab == "サマリー" else self.preview_text
+        text = textbox.get("1.0", "end-1c")
+        placeholders = {
+            "",
+            "AIサマリーを生成中です...\n\n文字起こし結果は保存済みです。",
+            "（この履歴にはサマリーがありません）",
+            "文字起こし結果がありません",
+        }
+        if text.strip() in placeholders:
+            self.copy_button.configure(text="内容なし")
+            self.after(1500, lambda: self.copy_button.configure(text="コピー"))
+            return
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.copy_button.configure(text="✓ コピー済み")
+        self.after(1500, lambda: self.copy_button.configure(text="コピー"))
+
+    def open_active_tab_window(self):
+        tab = self.preview_tabs.get()
+        textbox = self.summary_text if tab == "サマリー" else self.preview_text
+        text = textbox.get("1.0", "end-1c").strip()
+        placeholders = {
+            "",
+            "AIサマリーを生成中です...\n\n文字起こし結果は保存済みです。",
+            "（この履歴にはサマリーがありません）",
+            "文字起こし結果がありません",
+        }
+        if text in placeholders:
+            self.fullscreen_preview_button.configure(text="内容なし")
+            self.after(1500, lambda: self.fullscreen_preview_button.configure(text="全文表示"))
+            return
+
+        window = ctk.CTkToplevel(self)
+        window.title(f"{tab} - 全文表示")
+        window.geometry("900x680")
+        window.minsize(640, 420)
+        window.transient(self)
+
+        container = ctk.CTkFrame(window, fg_color="transparent")
+        container.pack(fill="both", expand=True, padx=18, pady=16)
+
+        header = ctk.CTkFrame(container, fg_color="transparent")
+        header.pack(fill="x", pady=(0, 10))
+        ctk.CTkLabel(
+            header, text=tab,
+            font=ctk.CTkFont(size=16, weight="bold"),
+            anchor="w"
+        ).pack(side="left")
+
+        def copy_popup_text():
+            window.clipboard_clear()
+            window.clipboard_append(text)
+            popup_copy_button.configure(text="✓ コピー済み")
+            window.after(1500, lambda: popup_copy_button.configure(text="コピー"))
+
+        popup_copy_button = ctk.CTkButton(
+            header, text="コピー",
+            font=ctk.CTkFont(size=12), height=28, width=80,
+            fg_color="#263241", hover_color="#334155",
+            command=copy_popup_text
+        )
+        popup_copy_button.pack(side="right")
+
+        full_textbox = ctk.CTkTextbox(
+            container,
+            font=ctk.CTkFont(size=13),
+            fg_color="#0B1120",
+            wrap="word"
+        )
+        full_textbox.pack(fill="both", expand=True)
+        full_textbox.insert("1.0", text)
+        full_textbox.configure(state="disabled")
+
+    def _regenerate_summary(self):
+        if self.processing or self._summary_running or not self._batch_results:
+            return
+        self._cancel_requested = False
+        self._start_summary_generation()
+
+    def _on_close(self):
+        if self.processing or self._summary_running:
+            if not messagebox.askokcancel(
+                "処理中です",
+                "文字起こし／サマリー生成が進行中です。\n"
+                "終了すると進行中の処理は失われます。終了しますか？",
+                parent=self,
+            ):
+                return
+            self._closing = True
+            self._cancel_requested = True
+            self._log_event("forced close during active processing")
+            try:
+                self.destroy()
+            finally:
+                os._exit(0)
+        self.cleanup_temp()
+        self.destroy()
+
+    def _log_event(self, message):
+        try:
+            with open("/tmp/whisper-app-events.log", "a", encoding="utf-8") as f:
+                f.write(f"{datetime.now().strftime('%m-%d %H:%M:%S')} {message}\n")
+        except Exception:
+            pass
+
+    def report_callback_exception(self, exc, val, tb):
+        # GUIコールバック内の例外は標準では握り潰されがちなのでログに残す
+        self._log_event(
+            "GUI callback error: "
+            + "".join(traceback.format_exception(exc, val, tb))
+        )
+
     def open_result_file(self):
         if self._output_path and os.path.exists(self._output_path):
-            os.system(f'open "{self._output_path}"')
+            subprocess.run(["open", self._output_path])
 
     # ==================== クリーンアップ ====================
     def cleanup_temp(self):
@@ -856,12 +1191,15 @@ class WhisperApp(ctk.CTk):
             self.status_label.configure(text="ファイルを選択してください", text_color="red")
             return
         self.processing = True
+        self._cancel_requested = False
         self._batch_results = []
         self._batch_errors = []
         self._output_path = None
         self._summary_output_path = None
         self._file_start_time = None
         self.run_button.configure(state="disabled")
+        self.cancel_button.configure(state="normal", text="キャンセル")
+        self.regen_summary_button.configure(state="disabled")
         self.model_menu.configure(state="disabled")
         self.clear_files_button.configure(state="disabled")
         self.summary_switch.configure(state="disabled")
@@ -889,7 +1227,7 @@ class WhisperApp(ctk.CTk):
                 with open(token_path, "r") as f:
                     hf_token = f.read().strip()
                 self._diarization_pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1",
+                    "pyannote/speaker-diarization-community-1",
                     token=hf_token
                 )
                 if torch.backends.mps.is_available():
@@ -920,6 +1258,7 @@ class WhisperApp(ctk.CTk):
         # Step 1: 入力を WAV に統一変換
         # .wav 以外（動画も .m4a / .mp3 / .flac 等の音声コンテナも）は pyannote が直接読めず
         # 話者分離フェーズでフリーズする実害が出る。よって .wav 以外は全部 ffmpeg で WAV 化する。
+        self._check_cancel()
         if ext == WAV_EXT:
             audio_path = file_path
         else:
@@ -929,6 +1268,7 @@ class WhisperApp(ctk.CTk):
             extract_audio(file_path, temp_audio)
             audio_path = temp_audio
             self.after(0, self.update_progress, 5, "音声変換完了")
+        self._check_cancel()
 
         # Step 2: チャンク分割
         self.after(0, self.update_progress, 15, "音声を分割中...")
@@ -957,6 +1297,7 @@ class WhisperApp(ctk.CTk):
             nonlocal all_segments
             import mlx_whisper
             for i, (chunk_path, offset) in enumerate(chunks):
+                self._check_cancel()
                 pct = 18 + int((i / total_chunks) * 62)
                 self.after(0, self.update_progress, pct,
                            f"文字起こし中... チャンク {i+1}/{total_chunks}")
@@ -981,6 +1322,23 @@ class WhisperApp(ctk.CTk):
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 d_future = executor.submit(do_diarization)
                 t_future = executor.submit(do_transcription)
+                waiting_for_diarization = False
+                while True:
+                    done, _ = concurrent.futures.wait(
+                        [d_future, t_future],
+                        timeout=0.5,
+                        return_when=concurrent.futures.ALL_COMPLETED,
+                    )
+                    if len(done) == 2:
+                        break
+                    if self._cancel_requested and not waiting_for_diarization:
+                        waiting_for_diarization = True
+                        self.after(
+                            0,
+                            self.update_progress,
+                            70,
+                            "キャンセル中...話者分離の完了を待っています",
+                        )
                 d_future.result()
                 t_future.result()
         elif diarization_enabled:
@@ -991,6 +1349,7 @@ class WhisperApp(ctk.CTk):
             self.after(0, self.update_progress, 18, "文字起こしを開始（話者分離スキップ）...")
             do_transcription()
 
+        self._check_cancel()
         self.after(0, self.update_progress, 85, "結合中...")
 
         # Step 5: 話者とテキストを結合（話者分離OFFのときは全セグメントを単一話者として扱う）
@@ -1060,17 +1419,23 @@ class WhisperApp(ctk.CTk):
 
     # ==================== バッチメイン処理 ====================
     def run_transcribe(self):
-        model_size = self.model_var.get()
+        # 表示ラベル（日本語）から内部モデル名に変換
+        model_size = MODEL_LABEL_TO_NAME.get(self.model_var.get(), self.model_var.get())
         total_files = len(self.file_paths)
 
         # モデル準備（全バッチで1回）
         try:
+            self._check_cancel()
             self._ensure_models(model_size)
+        except CancelledError:
+            pass
         except Exception as e:
-            self.after(0, self._on_fatal_error, e)
+            self.after(0, self._on_fatal_error, e, traceback.format_exc())
             return
 
         for idx, file_path in enumerate(self.file_paths, start=1):
+            if self._cancel_requested:
+                break
             self._file_start_time = time.time()
             self.after(0, self._update_batch_status, idx, total_files, file_path)
             self.after(0, self.progress.set, 0)
@@ -1085,23 +1450,32 @@ class WhisperApp(ctk.CTk):
                 })
                 self.after(0, self.add_history_entry, file_path, output_path, model_size)
                 self._output_path = output_path
+            except CancelledError:
+                self._log_event(f"cancelled during: {os.path.basename(file_path)}")
+                break
             except Exception as e:
                 self._batch_errors.append({
                     "file": file_path,
                     "error": str(e),
                     "detail": traceback.format_exc(),
                 })
+                self._log_event(
+                    f"file error: {os.path.basename(file_path)}: {e}\n"
+                    + traceback.format_exc()
+                )
             finally:
                 self.cleanup_temp()
 
         batch_elapsed = time.time() - self._start_time
         self.after(0, self.on_batch_complete, batch_elapsed)
 
-    def _on_fatal_error(self, error):
+    def _on_fatal_error(self, error, tb_text=None):
         """モデルロード失敗など致命的エラー"""
         self.stop_elapsed_timer()
         self.processing = False
+        self._file_start_time = None
         self.run_button.configure(state="normal")
+        self._reset_cancel_button()
         self.model_menu.configure(state="normal")
         self.clear_files_button.configure(state="normal")
         self.summary_switch.configure(state="normal")
@@ -1112,7 +1486,24 @@ class WhisperApp(ctk.CTk):
             text_color="#FCA5A5",
             fg_color="#3F1D24"
         )
-        self.show_preview(f"モデルの読み込みに失敗しました:\n\n{str(error)}\n\n{traceback.format_exc()}")
+        self._log_event(
+            "fatal error:\n"
+            + (
+                tb_text
+                if tb_text
+                else "".join(traceback.format_exception(type(error), error, error.__traceback__))
+            )
+        )
+        self.show_preview(
+            "処理を開始できませんでした。\n\n"
+            f"原因: {error}\n\n"
+            "対処のヒント:\n"
+            "- 初回は話者分離モデルの取得に Hugging Face トークン"
+            "（~/.huggingface/token）が必要です\n"
+            "- メモリ不足の場合は「軽量」をONにするか、小さめのモデルをお試しください\n"
+            "- ネットワーク接続もご確認ください（モデルの初回ダウンロード時のみ）\n\n"
+            "詳細ログ: /tmp/whisper-app-events.log"
+        )
 
     # ==================== バッチ完了 ====================
     def on_batch_complete(self, batch_elapsed):
@@ -1131,7 +1522,17 @@ class WhisperApp(ctk.CTk):
         bm = int(batch_elapsed // 60)
         bs = int(batch_elapsed % 60)
 
-        if error_count == 0:
+        if self._cancel_requested:
+            self._reset_cancel_button()
+            self._batch_status_label.configure(
+                text=f"キャンセルしました（完了分: {success_count}件）"
+            )
+            self.status_label.configure(
+                text=f"キャンセルしました（{bm}分{bs:02d}秒）",
+                text_color="#FCD34D",
+                fg_color="#3B2F12"
+            )
+        elif error_count == 0:
             self._batch_status_label.configure(text=f"全{success_count}件 完了！")
             self.status_label.configure(
                 text=f"完了！ {success_count}件処理（{bm}分{bs:02d}秒）",
@@ -1164,22 +1565,36 @@ class WhisperApp(ctk.CTk):
 
         body = "\n".join(preview_parts).strip()
         self.show_preview(body if body else "文字起こし結果がありません")
-        self.progress.set(1)
+        if self._cancel_requested:
+            self.progress.set(0)
+        else:
+            self.progress.set(1)
 
         if self._batch_results:
             self.open_file_button.configure(state="normal")
-            if self.summary_enabled_var.get():
+            self.regen_summary_button.configure(state="normal")
+            self._log_event(
+                f"batch complete: success={len(self._batch_results)} "
+                f"errors={len(self._batch_errors)} "
+                f"summary_enabled={self.summary_enabled_var.get()} "
+                f"cancelled={self._cancel_requested}"
+            )
+            if self.summary_enabled_var.get() and not self._cancel_requested:
                 self._start_summary_generation()
+            else:
+                self._reset_cancel_button()
+        else:
+            self._reset_cancel_button()
 
     # ==================== AIサマリー ====================
     def _start_summary_generation(self):
         if self._summary_running:
             return
-        self.summary_settings["summary_enabled"] = True
-        save_settings(self.summary_settings)
         settings = self.summary_settings.copy()
         self._summary_running = True
         self.run_button.configure(state="disabled")
+        self.cancel_button.configure(state="normal", text="キャンセル")
+        self.regen_summary_button.configure(state="disabled")
         self.model_menu.configure(state="disabled")
         self.clear_files_button.configure(state="disabled")
         self.summary_switch.configure(state="disabled")
@@ -1188,32 +1603,53 @@ class WhisperApp(ctk.CTk):
         backend = settings.get("backend", "ollama")
         model = settings.get("model") or BACKEND_DEFAULT_MODELS.get(backend, "llama3.1")
         self.status_label.configure(
-            text=f"AIサマリー生成中...（{backend} / {model}）",
+            text=f"AIサマリー生成中...（{model}）初回はモデル読み込みで数十秒余分にかかります",
             text_color="#BFDBFE",
             fg_color="#172554"
         )
+        # 生成中はプログレスバーを動かし続けて「固まっていない」ことを見せる
+        self.progress.configure(mode="indeterminate")
+        self.progress.start()
+        self._file_start_time = None
+        self.start_elapsed_timer()
         self.show_summary("AIサマリーを生成中です...\n\n文字起こし結果は保存済みです。")
+        self._log_event(f"summary start: files={len(self._batch_results)} backend={backend} model={model}")
+        # ワーカースレッドの結果受け渡し用（GUI更新はメインスレッドの_poll_summaryが行う）
+        self._summary_display_text = None
+        self._summary_display_shown = None
+        self._summary_progress = None
+        self._summary_progress_shown = None
+        self._summary_done = False
+        self._summary_cancelled = False
+        self._summary_errors = []
         thread = threading.Thread(
             target=self._run_summary_generation,
             args=(settings,),
             daemon=True
         )
         thread.start()
+        self.after(700, self._poll_summary)
 
     def _run_summary_generation(self, settings):
+        # ワーカースレッド。バックグラウンドスレッドからのafter()によるGUI更新は
+        # 失われることがあるため、ここではGUIを一切触らず属性に結果を置くだけにする。
         lines = []
         errors = []
+        total = len(self._batch_results)
         for idx, result in enumerate(self._batch_results, start=1):
+            if self._cancel_requested:
+                lines.append("（キャンセルしました。以降のファイルはスキップ）")
+                self._summary_display_text = "\n".join(lines)
+                self._summary_cancelled = True
+                break
             name = os.path.basename(result["file"])
-            self.after(
-                0,
-                self._update_batch_status,
-                idx,
-                len(self._batch_results),
-                result["file"]
-            )
+            self._summary_progress = (idx, total, result["file"])
             try:
-                summary = summarize_text(result.get("text", ""), settings)
+                summary = summarize_text(
+                    result.get("text", ""), settings,
+                    cancel_check=self._check_cancel,
+                )
+                self._check_cancel()
                 if not summary:
                     summary = "サマリーが空でした。"
                 summary_path = os.path.splitext(result["file"])[0] + "_サマリー.txt"
@@ -1226,7 +1662,12 @@ class WhisperApp(ctk.CTk):
                 lines.append("━━━━━━━━━━━━━━━━━━━━━━━━")
                 lines.append(summary)
                 lines.append("")
-                self.after(0, self.show_summary, "\n".join(lines))
+                self._summary_display_text = "\n".join(lines)
+            except CancelledError:
+                lines.append("（キャンセルしました）")
+                self._summary_display_text = "\n".join(lines)
+                self._summary_cancelled = True
+                break
             except Exception as e:
                 message = str(e)
                 errors.append({"file": result["file"], "error": message})
@@ -1236,19 +1677,52 @@ class WhisperApp(ctk.CTk):
                 lines.append("サマリー生成に失敗しました。")
                 lines.append(message)
                 lines.append("")
-                self.after(0, self.show_summary, "\n".join(lines))
+                self._summary_display_text = "\n".join(lines)
 
-        self.after(0, self._on_summary_complete, errors)
+        self._summary_errors = errors
+        self._summary_done = True
+
+    def _poll_summary(self):
+        """メインスレッドでサマリー生成の進捗・結果を表示に反映する"""
+        done = self._summary_done
+        progress = self._summary_progress
+        if progress is not None and progress != self._summary_progress_shown:
+            self._summary_progress_shown = progress
+            self._update_batch_status(*progress)
+        text = self._summary_display_text
+        if text is not None and text != self._summary_display_shown:
+            self._summary_display_shown = text
+            self._log_event(f"summary display update: {len(text)} chars")
+            self.show_summary(text)
+        if done:
+            self._log_event(f"summary complete: errors={len(self._summary_errors)}")
+            self._on_summary_complete(self._summary_errors)
+        else:
+            self.after(700, self._poll_summary)
 
     def _on_summary_complete(self, errors):
         self._summary_running = False
+        self.stop_elapsed_timer()
+        self.progress.stop()
+        self.progress.configure(mode="determinate")
+        self.progress.set(0 if self._summary_cancelled else 1)
         self.run_button.configure(state="normal")
+        self._reset_cancel_button()
+        if self._batch_results:
+            self.regen_summary_button.configure(state="normal")
         self.model_menu.configure(state="normal")
         self.clear_files_button.configure(state="normal")
         self.summary_switch.configure(state="normal")
         self.summary_settings_button.configure(state="normal")
         self._refresh_file_list()
-        if errors:
+        self._record_summary_outputs()
+        if self._summary_cancelled:
+            self.status_label.configure(
+                text="サマリー生成をキャンセルしました（文字起こしは保存済み）",
+                text_color="#FCD34D",
+                fg_color="#3B2F12"
+            )
+        elif errors:
             self.status_label.configure(
                 text=f"文字起こし完了 / サマリーは{len(errors)}件失敗",
                 text_color="#FDBA74",
@@ -1260,6 +1734,26 @@ class WhisperApp(ctk.CTk):
                 text_color="#BBF7D0",
                 fg_color="#12351F"
             )
+
+    def _record_summary_outputs(self):
+        """生成済みサマリーのパスを履歴に記録する"""
+        summary_by_output = {
+            r.get("output"): r.get("summary_output")
+            for r in self._batch_results
+            if r.get("summary_output")
+        }
+        if not summary_by_output:
+            return
+        history = load_history()
+        changed = False
+        for entry in history:
+            summary_path = summary_by_output.get(entry.get("output"))
+            if summary_path and entry.get("summary") != summary_path:
+                entry["summary"] = summary_path
+                changed = True
+        if changed:
+            save_history(history)
+            self.load_history_display()
 
     # ==================== 履歴 ====================
     def load_history_display(self):
@@ -1285,9 +1779,47 @@ class WhisperApp(ctk.CTk):
                 btn = ctk.CTkButton(
                     row, text="開く", font=ctk.CTkFont(size=10),
                     height=20, width=40, fg_color="gray30",
-                    command=lambda p=path: os.system(f'open -R "{p}"')
+                    command=lambda p=path: subprocess.run(["open", "-R", p])
                 )
                 btn.pack(side="right", padx=(4, 0))
+                show_btn = ctk.CTkButton(
+                    row, text="表示", font=ctk.CTkFont(size=10),
+                    height=20, width=40, fg_color="gray30",
+                    command=lambda e=entry: self._show_history_entry(e)
+                )
+                show_btn.pack(side="right", padx=(4, 0))
+
+    def _show_history_entry(self, entry):
+        """履歴の文字起こし・サマリーをプレビュータブに読み込む"""
+        if self.processing or self._summary_running:
+            return
+        output = entry.get("output", "")
+        try:
+            with open(output, "r", encoding="utf-8") as f:
+                transcript = f.read()
+        except OSError as e:
+            self.status_label.configure(
+                text=f"履歴ファイルを開けませんでした: {e}",
+                text_color="#FCA5A5", fg_color="#3F1D24"
+            )
+            return
+        summary_path = entry.get("summary", "")
+        summary_text = "（この履歴にはサマリーがありません）"
+        if summary_path and os.path.exists(summary_path):
+            try:
+                with open(summary_path, "r", encoding="utf-8") as f:
+                    summary_text = f.read()
+            except OSError:
+                pass
+        self._set_textbox_text(self.summary_text, summary_text)
+        self.show_preview(transcript)
+        self._output_path = output
+        self.open_file_button.configure(state="normal")
+        self.regen_summary_button.configure(state="disabled")
+        self.status_label.configure(
+            text=f"履歴を表示中: {entry.get('file', '')}",
+            text_color="#CBD5E1", fg_color="#1F2937"
+        )
 
     def add_history_entry(self, file_path, output_path, model):
         history = load_history()
